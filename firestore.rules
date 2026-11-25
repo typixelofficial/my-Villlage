@@ -1,0 +1,369 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Default-Deny Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Global Hardened Primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    // Admin check strictly mandates verified email (blocks email spoofing) or trusted admins doc
+    function isAdmin() {
+      return isSignedIn() && (
+        (request.auth.token.email == 'hashimtypixel@gmail.com' && request.auth.token.email_verified == true)
+        || exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isHexColor(val) {
+      return val is string && val.size() >= 4 && val.size() <= 12 && val.matches('^#[0-9a-fA-F]{3,8}$');
+    }
+
+    function isValidInstagram(val) {
+      return val is string && val.size() <= 32 && val.matches('^$|^[a-zA-Z0-9._]{1,30}$');
+    }
+
+    function isValidStringList(arr, maxLen) {
+      return arr is list && arr.size() <= maxLen && (arr.size() == 0 || (arr[0] is string && arr[0].size() >= 1 && arr[0].size() <= 128));
+    }
+
+    function isValidAppearance(app) {
+      return app is map
+        && app.keys().hasAll([
+          'gender', 'skinTone', 'hairStyle', 'hairColor',
+          'shirtStyle', 'shirtColor', 'pantsColor', 'shoeColor', 'accessory'
+        ])
+        && app.keys().hasOnly([
+          'gender', 'skinTone', 'hairStyle', 'hairColor',
+          'shirtStyle', 'shirtColor', 'pantsColor', 'shoeColor', 'accessory'
+        ])
+        && app.gender in ['male', 'female']
+        && isHexColor(app.skinTone)
+        && app.hairStyle in ['short', 'long', 'spiky', 'bob', 'ponytail']
+        && isHexColor(app.hairColor)
+        && app.shirtStyle in ['tee', 'jacket', 'hoodie', 'polo']
+        && isHexColor(app.shirtColor)
+        && isHexColor(app.pantsColor)
+        && isHexColor(app.shoeColor)
+        && app.accessory in ['none', 'glasses', 'cap', 'backpack', 'headphones'];
+    }
+
+    function isValidPosition(pos) {
+      return pos is map
+        && pos.keys().hasAll(['x', 'y', 'z'])
+        && pos.keys().hasOnly(['x', 'y', 'z'])
+        && pos.x is number && pos.x >= -500 && pos.x <= 500
+        && pos.y is number && pos.y >= -50 && pos.y <= 300
+        && pos.z is number && pos.z >= -500 && pos.z <= 500;
+    }
+
+    function isValidPlayer(data, uid) {
+      return data.keys().hasAll([
+          'uid', 'displayName', 'instagramId', 'photoURL', 'appearance',
+          'greenCoins', 'level', 'xp',
+          'ownedProperties', 'ownedBusinesses', 'ownedVehicles',
+          'completedMissions', 'claimedRewards',
+          'inventory', 'friends', 'lastPosition', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'displayName', 'instagramId', 'photoURL', 'appearance',
+          'greenCoins', 'level', 'xp',
+          'ownedProperties', 'ownedBusinesses', 'ownedVehicles',
+          'completedMissions', 'claimedRewards',
+          'inventory', 'friends', 'lastPosition', 'createdAt', 'updatedAt'
+        ])
+        && data.uid == uid
+        && (data.uid == request.auth.uid || isAdmin())
+        && isValidId(data.uid)
+        && data.displayName is string
+        && data.displayName.size() >= 2 && data.displayName.size() <= 24
+        && data.displayName.matches('^[a-zA-Z0-9 _\\-]+$')
+        && isValidInstagram(data.instagramId)
+        && data.photoURL is string && data.photoURL.size() <= 512
+        && isValidAppearance(data.appearance)
+        && data.greenCoins is number && data.greenCoins >= 0 && data.greenCoins <= 10000000
+        && data.level is number && data.level >= 1 && data.level <= 100
+        && data.xp is number && data.xp >= 0 && data.xp <= 1000000
+        && isValidStringList(data.ownedProperties, 30)
+        && isValidStringList(data.ownedBusinesses, 10)
+        && isValidStringList(data.ownedVehicles, 20)
+        && isValidStringList(data.completedMissions, 50)
+        && isValidStringList(data.claimedRewards, 30)
+        && isValidStringList(data.inventory, 30)
+        && isValidStringList(data.friends, 50)
+        && isValidPosition(data.lastPosition)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPrivateAccount(data, uid) {
+      return data.keys().hasAll(['uid', 'email', 'googleName', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'googleName', 'createdAt', 'updatedAt'])
+        && data.uid == uid
+        && data.uid == request.auth.uid
+        && isValidId(data.uid)
+        && data.email is string && data.email.size() <= 256
+        && data.googleName is string && data.googleName.size() <= 128
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTransaction(data, uid) {
+      return data.keys().hasAll(['uid', 'type', 'amount', 'reason', 'balanceAfter', 'createdAt'])
+        && data.keys().hasOnly(['uid', 'type', 'amount', 'reason', 'balanceAfter', 'createdAt'])
+        && data.uid == uid
+        && data.uid == request.auth.uid
+        && isValidId(data.uid)
+        && data.type in ['earn', 'spend']
+        && data.amount is number && data.amount > 0 && data.amount <= 50000
+        && data.reason is string && data.reason.size() >= 2 && data.reason.size() <= 120
+        && data.balanceAfter is number && data.balanceAfter >= 0 && data.balanceAfter <= 10000000
+        && data.createdAt is timestamp;
+    }
+
+    function isValidProperty(data, propertyId) {
+      return data.keys().hasAll([
+          'propertyId', 'ownerUid', 'ownerName',
+          'interiorTheme', 'gardenStyle', 'isPublic',
+          'purchasedAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'propertyId', 'ownerUid', 'ownerName',
+          'interiorTheme', 'gardenStyle', 'isPublic',
+          'purchasedAt', 'updatedAt'
+        ])
+        && data.propertyId == propertyId
+        && isValidId(data.propertyId)
+        && isValidId(data.ownerUid)
+        && data.ownerName is string
+        && data.ownerName.size() >= 2 && data.ownerName.size() <= 24
+        && data.ownerName.matches('^[a-zA-Z0-9 _\\-]+$')
+        && data.interiorTheme in ['modern', 'cozy', 'minimal', 'luxury']
+        && data.gardenStyle in ['flowers', 'zen', 'poolside', 'orchard']
+        && data.isPublic is bool && data.isPublic == true
+        && data.purchasedAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidCustomHome(data, homeId) {
+      return data.keys().hasAll([
+          'homeId', 'name', 'ownerUid', 'ownerName', 'ownerInstagram',
+          'createdByAdmin', 'style', 'wallColor', 'roofColor', 'hasPool',
+          'interiorTheme', 'gardenStyle', 'x', 'y', 'z', 'isPublic',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'homeId', 'name', 'ownerUid', 'ownerName', 'ownerInstagram',
+          'createdByAdmin', 'style', 'wallColor', 'roofColor', 'hasPool',
+          'interiorTheme', 'gardenStyle', 'x', 'y', 'z', 'isPublic',
+          'createdAt', 'updatedAt'
+        ])
+        && data.homeId == homeId
+        && isValidId(data.homeId)
+        && data.name is string && data.name.size() >= 2 && data.name.size() <= 32
+        && data.name.matches('^[a-zA-Z0-9 _\\-]+$')
+        && isValidId(data.ownerUid)
+        && data.ownerName is string && data.ownerName.size() >= 2 && data.ownerName.size() <= 24
+        && data.ownerName.matches('^[a-zA-Z0-9 _\\-]+$')
+        && isValidInstagram(data.ownerInstagram)
+        && data.createdByAdmin is bool
+        && data.style in ['cabin', 'modern', 'villa', 'manor']
+        && isHexColor(data.wallColor)
+        && isHexColor(data.roofColor)
+        && data.hasPool is bool
+        && data.interiorTheme in ['modern', 'cozy', 'minimal', 'luxury']
+        && data.gardenStyle in ['flowers', 'zen', 'poolside', 'orchard']
+        && data.x is number && data.x >= -420 && data.x <= 420
+        && data.y is number && data.y >= -10 && data.y <= 50
+        && data.z is number && data.z >= -420 && data.z <= 420
+        && data.isPublic is bool && data.isPublic == true
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // 0. Trusted Admins Registry (read own status only, no client writes)
+    match /admins/{adminUid} {
+      allow get: if isOwner(adminUid) && isValidId(adminUid);
+      allow list, create, update, delete: if false;
+    }
+
+    // 1. Public Player Profiles (Zero Private Email PII)
+    match /players/{uid} {
+      allow get: if isSignedIn() && isValidId(uid);
+      allow list: if isSignedIn() && (resource.data.uid == request.auth.uid || isAdmin());
+
+      allow create: if isOwner(uid)
+        && isValidId(uid)
+        && isValidPlayer(incoming(), uid)
+        && incoming().greenCoins == 1500
+        && incoming().level == 1
+        && incoming().xp == 0
+        && incoming().ownedProperties.size() == 0
+        && incoming().ownedBusinesses.size() == 0
+        && incoming().ownedVehicles.size() == 0
+        && incoming().completedMissions.size() == 0
+        && incoming().claimedRewards.size() == 0
+        && incoming().inventory.size() == 0
+        && incoming().friends.size() == 0
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isSignedIn()
+        && isValidId(uid)
+        && isValidPlayer(incoming(), uid)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || (
+            isOwner(uid) && (
+              // Action 1: Customize character appearance, display name & Instagram ID
+              incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'instagramId', 'photoURL', 'appearance', 'updatedAt'])
+              ||
+              // Action 2: Sync gameplay progression, vehicles, rewards, wallet & position
+              (
+                incoming().diff(existing()).affectedKeys().hasOnly([
+                  'greenCoins', 'level', 'xp', 'ownedProperties',
+                  'ownedBusinesses', 'ownedVehicles', 'completedMissions',
+                  'claimedRewards', 'inventory', 'friends', 'lastPosition', 'updatedAt'
+                ])
+                && incoming().greenCoins <= existing().greenCoins + 1500
+              )
+            )
+          )
+        );
+
+      allow delete: if false;
+
+      // 1a. Isolated Private Account PII (Owner Only)
+      match /private/{docId} {
+        allow get: if isOwner(uid) && isValidId(uid) && isValidId(docId);
+        allow list: if isOwner(uid) && resource.data.uid == request.auth.uid;
+
+        allow create: if isOwner(uid)
+          && isValidId(uid)
+          && isValidId(docId)
+          && docId == 'account'
+          && isValidPrivateAccount(incoming(), uid)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && existsAfter(/databases/$(database)/documents/players/$(uid));
+
+        allow update: if isOwner(uid)
+          && isValidId(uid)
+          && isValidId(docId)
+          && docId == 'account'
+          && isValidPrivateAccount(incoming(), uid)
+          && incoming().uid == existing().uid
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'googleName', 'updatedAt'])
+          && exists(/databases/$(database)/documents/players/$(uid));
+
+        allow delete: if false;
+      }
+
+      // 1b. Immutable Wallet Transactions (Owner Only)
+      match /transactions/{txId} {
+        allow get: if isOwner(uid) && isValidId(uid) && isValidId(txId);
+        allow list: if isOwner(uid) && resource.data.uid == request.auth.uid;
+
+        allow create: if isOwner(uid)
+          && isValidId(uid)
+          && isValidId(txId)
+          && isValidTransaction(incoming(), uid)
+          && incoming().createdAt == request.time
+          && exists(/databases/$(database)/documents/players/$(uid));
+
+        allow update: if false;
+        allow delete: if false;
+      }
+    }
+
+    // 2. Shared World Pre-Built Properties
+    match /properties/{propertyId} {
+      allow get: if isSignedIn() && isValidId(propertyId);
+      allow list: if isSignedIn() && resource.data.isPublic == true;
+
+      allow create: if isSignedIn()
+        && isValidId(propertyId)
+        && isValidProperty(incoming(), propertyId)
+        && (incoming().ownerUid == request.auth.uid || isAdmin())
+        && incoming().purchasedAt == request.time
+        && incoming().updatedAt == request.time
+        && exists(/databases/$(database)/documents/players/$(request.auth.uid));
+
+      allow update: if isSignedIn()
+        && isValidId(propertyId)
+        && isValidProperty(incoming(), propertyId)
+        && (existing().ownerUid == request.auth.uid || isAdmin())
+        && incoming().ownerUid == existing().ownerUid
+        && incoming().propertyId == existing().propertyId
+        && incoming().purchasedAt == existing().purchasedAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['ownerName', 'interiorTheme', 'gardenStyle', 'updatedAt']);
+
+      allow delete: if false;
+    }
+
+    // 3. Dynamically Built Custom 3D Homes (Player-built with Green Coins or Admin-built for anyone)
+    match /customHomes/{homeId} {
+      allow get: if isSignedIn() && isValidId(homeId);
+      allow list: if isSignedIn() && resource.data.isPublic == true;
+
+      allow create: if isSignedIn()
+        && isValidId(homeId)
+        && isValidCustomHome(incoming(), homeId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && exists(/databases/$(database)/documents/players/$(request.auth.uid))
+        && (
+          isAdmin()
+          || (incoming().ownerUid == request.auth.uid && incoming().createdByAdmin == false)
+        );
+
+      allow update: if isSignedIn()
+        && isValidId(homeId)
+        && isValidCustomHome(incoming(), homeId)
+        && incoming().homeId == existing().homeId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || (
+            existing().ownerUid == request.auth.uid
+            && incoming().ownerUid == existing().ownerUid
+            && incoming().createdByAdmin == existing().createdByAdmin
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'name', 'ownerName', 'ownerInstagram', 'wallColor', 'roofColor',
+              'interiorTheme', 'gardenStyle', 'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isAdmin() && isValidId(homeId);
+    }
+  }
+}

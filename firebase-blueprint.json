@@ -1,0 +1,331 @@
+{
+  "entities": {
+    "PlayerProfile": {
+      "title": "PlayerProfile",
+      "description": "Publicly visible Green Valley player profile, Instagram handle, 3D avatar customization, economy balance, and progression (strictly excludes private email/PII).",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 24,
+          "pattern": "^[a-zA-Z0-9 _\\-]+$"
+        },
+        "instagramId": {
+          "type": "string",
+          "maxLength": 32,
+          "pattern": "^$|^[a-zA-Z0-9._]{1,30}$"
+        },
+        "photoURL": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "appearance": {
+          "type": "object",
+          "description": "3D character customization map"
+        },
+        "greenCoins": {
+          "type": "number"
+        },
+        "level": {
+          "type": "number"
+        },
+        "xp": {
+          "type": "number"
+        },
+        "ownedProperties": {
+          "type": "array",
+          "description": "List of owned property IDs (max 30)"
+        },
+        "ownedBusinesses": {
+          "type": "array",
+          "description": "List of owned business IDs (max 10)"
+        },
+        "ownedVehicles": {
+          "type": "array",
+          "description": "List of permanently unlocked vehicle IDs (max 20)"
+        },
+        "completedMissions": {
+          "type": "array",
+          "description": "List of completed mission IDs (max 50)"
+        },
+        "claimedRewards": {
+          "type": "array",
+          "description": "List of claimed reward IDs (max 30)"
+        },
+        "inventory": {
+          "type": "array",
+          "description": "List of owned virtual item IDs (max 30)"
+        },
+        "friends": {
+          "type": "array",
+          "description": "List of friend UIDs (max 50)"
+        },
+        "lastPosition": {
+          "type": "object",
+          "description": "Last saved 3D coordinates {x, y, z}"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "uid",
+        "displayName",
+        "instagramId",
+        "photoURL",
+        "appearance",
+        "greenCoins",
+        "level",
+        "xp",
+        "ownedProperties",
+        "ownedBusinesses",
+        "ownedVehicles",
+        "completedMissions",
+        "claimedRewards",
+        "inventory",
+        "friends",
+        "lastPosition",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "PlayerPrivateAccount": {
+      "title": "PlayerPrivateAccount",
+      "description": "Isolated PII document storing the authenticated player's email and account name.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "googleName": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "email", "googleName", "createdAt", "updatedAt"]
+    },
+    "WalletTransaction": {
+      "title": "WalletTransaction",
+      "description": "Immutable Green Coins wallet transaction log entry.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["earn", "spend"]
+        },
+        "amount": {
+          "type": "number"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 120
+        },
+        "balanceAfter": {
+          "type": "number"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "type", "amount", "reason", "balanceAfter", "createdAt"]
+    },
+    "WorldProperty": {
+      "title": "WorldProperty",
+      "description": "Shared Green Valley pre-built property ownership and customization record.",
+      "type": "object",
+      "properties": {
+        "propertyId": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerName": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 24,
+          "pattern": "^[a-zA-Z0-9 _\\-]+$"
+        },
+        "interiorTheme": {
+          "type": "string",
+          "enum": ["modern", "cozy", "minimal", "luxury"]
+        },
+        "gardenStyle": {
+          "type": "string",
+          "enum": ["flowers", "zen", "poolside", "orchard"]
+        },
+        "isPublic": {
+          "type": "boolean"
+        },
+        "purchasedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "propertyId",
+        "ownerUid",
+        "ownerName",
+        "interiorTheme",
+        "gardenStyle",
+        "isPublic",
+        "purchasedAt",
+        "updatedAt"
+      ]
+    },
+    "CustomHome": {
+      "title": "CustomHome",
+      "description": "Dynamically constructed 3D home created by a player using Green Coins or built by an Admin for any resident.",
+      "type": "object",
+      "properties": {
+        "homeId": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 32,
+          "pattern": "^[a-zA-Z0-9 _\\-]+$"
+        },
+        "ownerUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerName": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 24,
+          "pattern": "^[a-zA-Z0-9 _\\-]+$"
+        },
+        "ownerInstagram": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "createdByAdmin": {
+          "type": "boolean"
+        },
+        "style": {
+          "type": "string",
+          "enum": ["cabin", "modern", "villa", "manor"]
+        },
+        "wallColor": {
+          "type": "string",
+          "maxLength": 12
+        },
+        "roofColor": {
+          "type": "string",
+          "maxLength": 12
+        },
+        "hasPool": {
+          "type": "boolean"
+        },
+        "interiorTheme": {
+          "type": "string",
+          "enum": ["modern", "cozy", "minimal", "luxury"]
+        },
+        "gardenStyle": {
+          "type": "string",
+          "enum": ["flowers", "zen", "poolside", "orchard"]
+        },
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "z": { "type": "number" },
+        "isPublic": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "homeId",
+        "name",
+        "ownerUid",
+        "ownerName",
+        "ownerInstagram",
+        "createdByAdmin",
+        "style",
+        "wallColor",
+        "roofColor",
+        "hasPool",
+        "interiorTheme",
+        "gardenStyle",
+        "x",
+        "y",
+        "z",
+        "isPublic",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/players/{uid}": {
+      "schema": { "$ref": "#/entities/PlayerProfile" },
+      "description": "Public player profile, Instagram handle, avatar, vehicles, and progression."
+    },
+    "/players/{uid}/private/{docId}": {
+      "schema": { "$ref": "#/entities/PlayerPrivateAccount" },
+      "description": "Private owner-only PII subcollection."
+    },
+    "/players/{uid}/transactions/{txId}": {
+      "schema": { "$ref": "#/entities/WalletTransaction" },
+      "description": "Immutable owner-only wallet transaction history."
+    },
+    "/properties/{propertyId}": {
+      "schema": { "$ref": "#/entities/WorldProperty" },
+      "description": "Green Valley pre-built property ownership and customization."
+    },
+    "/customHomes/{homeId}": {
+      "schema": { "$ref": "#/entities/CustomHome" },
+      "description": "Player-built and Admin-built custom 3D homes placed across Green Valley."
+    }
+  }
+}

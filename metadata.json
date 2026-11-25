@@ -1,0 +1,6 @@
+{
+  "name": "TYPIXEL OPEN WORLD",
+  "description": "3D multiplayer open-world life simulation set in Green Valley with Google Sign-In, 3D character creation, drivable vehicles, property ownership, Green Coins economy, and real-time Socket.IO multiplayer.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
