@@ -2,7 +2,7 @@
   "entities": {
     "PlayerProfile": {
       "title": "PlayerProfile",
-      "description": "Publicly visible Green Valley player profile, Instagram handle, 3D avatar customization, economy balance, and progression (strictly excludes private email/PII).",
+      "description": "Publicly visible Green Valley player profile, Instagram handle, daily login reward streak, Single-to-Mingle age/status/partner, custom map locations, 3D avatar customization, economy balance, and progression (strictly excludes private email/PII).",
       "type": "object",
       "properties": {
         "uid": {
@@ -26,9 +26,49 @@
           "type": "string",
           "maxLength": 512
         },
+        "age": {
+          "type": "number"
+        },
+        "relationshipStatus": {
+          "type": "string",
+          "enum": ["single", "mingle", "married"]
+        },
+        "partnerUid": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "partnerName": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "partnerInstagram": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "lastDailyLoginDate": {
+          "type": "string",
+          "maxLength": 16,
+          "pattern": "^$|^\\d{4}-\\d{2}-\\d{2}$"
+        },
+        "dailyLoginStreak": {
+          "type": "number"
+        },
+        "totalDailyLogins": {
+          "type": "number"
+        },
+        "followedOfficial": {
+          "type": "boolean"
+        },
+        "followedStudio": {
+          "type": "boolean"
+        },
+        "customLocations": {
+          "type": "array",
+          "description": "Up to 15 custom saved map locations {id, name, category, x, z}"
+        },
         "appearance": {
           "type": "object",
-          "description": "3D character customization map"
+          "description": "3D character customization map (male/female outfits, dresses, mundu, kurti, hair, accessories)"
         },
         "greenCoins": {
           "type": "number"
@@ -304,12 +344,99 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "CustomShop": {
+      "title": "CustomShop",
+      "description": "Player-opened 3D street stall or shop (Tea Stall / Chaya Kada, Juice Bar, Bakery, Boutique, Tech Shop) in Green Valley.",
+      "type": "object",
+      "properties": {
+        "shopId": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 32,
+          "pattern": "^[a-zA-Z0-9 _\\-]+$"
+        },
+        "shopType": {
+          "type": "string",
+          "enum": ["tea_stall", "juice_bar", "bakery", "boutique", "tech_shop"]
+        },
+        "ownerUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerName": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 24,
+          "pattern": "^[a-zA-Z0-9 _\\-]+$"
+        },
+        "ownerInstagram": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "awningColor": {
+          "type": "string",
+          "maxLength": 12
+        },
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "z": { "type": "number" },
+        "totalSales": { "type": "number" },
+        "isPublic": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "shopId",
+        "name",
+        "shopType",
+        "ownerUid",
+        "ownerName",
+        "ownerInstagram",
+        "awningColor",
+        "x",
+        "y",
+        "z",
+        "totalSales",
+        "isPublic",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "VerifiedFollower": {
+      "title": "VerifiedFollower",
+      "description": "Verified Instagram follower status for @typixelofficial and @typixel.studio synced by Admin or live Instagram API (zero PII).",
+      "type": "object",
+      "properties": {
+        "instagramId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 30,
+          "pattern": "^[a-z0-9._]+$"
+        },
+        "followsOfficial": { "type": "boolean" },
+        "followsStudio": { "type": "boolean" },
+        "source": {
+          "type": "string",
+          "enum": ["admin_sync", "instagram_export", "live_api"]
+        },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["instagramId", "followsOfficial", "followsStudio", "source", "updatedAt"]
     }
   },
   "firestore": {
     "/players/{uid}": {
       "schema": { "$ref": "#/entities/PlayerProfile" },
-      "description": "Public player profile, Instagram handle, avatar, vehicles, and progression."
+      "description": "Public player profile, Instagram handle, daily login streak, Single-to-Mingle info, custom locations, avatar, and progression."
     },
     "/players/{uid}/private/{docId}": {
       "schema": { "$ref": "#/entities/PlayerPrivateAccount" },
@@ -326,6 +453,14 @@
     "/customHomes/{homeId}": {
       "schema": { "$ref": "#/entities/CustomHome" },
       "description": "Player-built and Admin-built custom 3D homes placed across Green Valley."
+    },
+    "/customShops/{shopId}": {
+      "schema": { "$ref": "#/entities/CustomShop" },
+      "description": "Player-opened custom 3D shops and Tea Stalls across Green Valley."
+    },
+    "/verifiedFollowers/{igDocId}": {
+      "schema": { "$ref": "#/entities/VerifiedFollower" },
+      "description": "Exact-ID lookup table of verified Instagram followers for @typixelofficial and @typixel.studio."
     }
   }
 }

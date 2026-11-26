@@ -52,7 +52,14 @@ export function CharacterPreviewCanvas({
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.12;
     renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2));
-    renderer.setSize(container.clientWidth, container.clientHeight);
+    renderer.domElement.style.width = '100%';
+    renderer.domElement.style.height = '100%';
+    renderer.domElement.style.display = 'block';
+    renderer.setSize(
+      Math.max(1, container.clientWidth),
+      Math.max(1, container.clientHeight),
+      false,
+    );
     renderer.shadowMap.enabled = !isSoftwareGl;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     container.innerHTML = '';
@@ -149,13 +156,23 @@ export function CharacterPreviewCanvas({
     renderer.domElement.addEventListener('pointerup', onPointerUp);
     renderer.domElement.addEventListener('pointercancel', onPointerUp);
 
+    let lastResizeW = Math.max(1, container.clientWidth);
+    let lastResizeH = Math.max(1, container.clientHeight);
+    let resizeRafId = 0;
     const onResize = () => {
-      if (!container) return;
-      const w = Math.max(1, container.clientWidth);
-      const h = Math.max(1, container.clientHeight);
-      camera.aspect = w / h;
-      camera.updateProjectionMatrix();
-      renderer.setSize(w, h);
+      if (resizeRafId) cancelAnimationFrame(resizeRafId);
+      resizeRafId = requestAnimationFrame(() => {
+        resizeRafId = 0;
+        if (!container) return;
+        const w = Math.max(1, container.clientWidth);
+        const h = Math.max(1, container.clientHeight);
+        if (w === lastResizeW && h === lastResizeH) return;
+        lastResizeW = w;
+        lastResizeH = h;
+        camera.aspect = w / h;
+        camera.updateProjectionMatrix();
+        renderer.setSize(w, h, false);
+      });
     };
     const ro = new ResizeObserver(onResize);
     ro.observe(container);
@@ -200,6 +217,7 @@ export function CharacterPreviewCanvas({
     return () => {
       disposed = true;
       cancelAnimationFrame(rafId);
+      if (resizeRafId) cancelAnimationFrame(resizeRafId);
       window.clearTimeout(timerId);
       ro.disconnect();
       renderer.domElement.removeEventListener('pointerdown', onPointerDown);

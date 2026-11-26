@@ -6,7 +6,9 @@ function getCtx(): AudioContext | null {
   if (!useGameStore.getState().audioEnabled) return null;
   if (typeof window === 'undefined') return null;
   if (!audioCtx) {
-    const AudioCtor = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    const AudioCtor =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
     if (!AudioCtor) return null;
     audioCtx = new AudioCtor();
   }
@@ -16,7 +18,15 @@ function getCtx(): AudioContext | null {
   return audioCtx;
 }
 
-export type SfxKind = 'click' | 'jump' | 'step' | 'coin' | 'chat' | 'engineStart';
+export type SfxKind =
+  | 'click'
+  | 'jump'
+  | 'step'
+  | 'coin'
+  | 'chat'
+  | 'engineStart'
+  | 'alarm'
+  | 'wedding';
 
 export function playSfx(kind: SfxKind): void {
   const ctx = getCtx();
@@ -24,6 +34,42 @@ export function playSfx(kind: SfxKind): void {
   const now = ctx.currentTime;
 
   try {
+    if (kind === 'alarm') {
+      // Pleasant 3-chime 5-minute Mingle alert bell
+      [784, 988, 1175].forEach((freq, i) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        const start = now + i * 0.16;
+        osc.frequency.setValueAtTime(freq, start);
+        gain.gain.setValueAtTime(0.08, start);
+        gain.gain.exponentialRampToValueAtTime(0.001, start + 0.28);
+        osc.start(start);
+        osc.stop(start + 0.3);
+      });
+      return;
+    }
+
+    if (kind === 'wedding') {
+      // Joyful festive major chord arpeggio
+      [523.25, 659.25, 783.99, 1046.5, 1318.5].forEach((freq, i) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'triangle';
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        const start = now + i * 0.11;
+        osc.frequency.setValueAtTime(freq, start);
+        gain.gain.setValueAtTime(0.09, start);
+        gain.gain.exponentialRampToValueAtTime(0.001, start + 0.45);
+        osc.start(start);
+        osc.stop(start + 0.48);
+      });
+      return;
+    }
+
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.connect(gain);

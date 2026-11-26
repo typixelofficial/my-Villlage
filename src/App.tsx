@@ -2,7 +2,10 @@ import { useEffect, useRef } from 'react';
 import { onAuthStateChanged } from 'firebase/auth';
 import {
   auth,
+  findMatchingHomeForPlayer,
+  getTodayDateKey,
   loadCustomHomes,
+  loadCustomShops,
   loadPlayerProfile,
   loadWalletTransactions,
   loadWorldProperties,
@@ -29,8 +32,9 @@ function GameShell() {
   const setScreen = useGameStore((s) => s.setScreen);
   const setWorldProperties = useGameStore((s) => s.setWorldProperties);
   const setCustomHomes = useGameStore((s) => s.setCustomHomes);
+  const setCustomShops = useGameStore((s) => s.setCustomShops);
   const setTransactions = useGameStore((s) => s.setTransactions);
-  const setAdminSession = useGameStore((s) => s.setAdminSession);
+  const setIsAdmin = useGameStore((s) => s.setIsAdmin);
   const resetForLogout = useGameStore((s) => s.resetForLogout);
 
   const mobileInputRef = useRef<MobileInputState>({
@@ -41,7 +45,7 @@ function GameShell() {
   });
   const interactTriggerRef = useRef<(() => void) | null>(null);
 
-  // Subscribe to Firebase Authentication session state
+  // Fast, Non-Blocking Firebase Session Hydration + Auto-Reach Home by UID/Instagram
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user) => {
       if (!user) {
@@ -52,31 +56,63 @@ function GameShell() {
       }
 
       setAuthUser(user, true);
-
-      // Auto-elevate bootstrapped owner email (also re-verified server-side on ID token!)
-      const existingToken = useGameStore.getState().adminToken;
-      if (user.email === BOOTSTRAPPED_ADMIN_EMAIL && user.emailVerified) {
-        setAdminSession(true, existingToken);
-      }
+      setIsAdmin(user.email === BOOTSTRAPPED_ADMIN_EMAIL && user.emailVerified);
 
       try {
-        const [existingProfile, propsMap, homesMap, txs] = await Promise.all([
+        // Fast path: only await player profile & custom homes so login completes rapidly!
+        const [existingProfile, homesMap] = await Promise.all([
           loadPlayerProfile(user.uid),
-          loadWorldProperties().catch(() => ({})),
           loadCustomHomes().catch(() => ({})),
-          loadWalletTransactions(user.uid).catch(() => []),
         ]);
-        setWorldProperties(propsMap);
         setCustomHomes(homesMap);
-        setTransactions(txs);
 
         if (existingProfile) {
-          setProfile(existingProfile);
+          // If player owns a home (self-built or Admin-built matching their UID or Instagram ID), spawn directly at their home!
+          const matchedHome = findMatchingHomeForPlayer(existingProfile, homesMap);
+          const spawnProfile = matchedHome
+            ? {
+                ...existingProfile,
+                lastPosition: {
+                  x: matchedHome.x,
+                  y: matchedHome.y,
+                  z: matchedHome.z + 9.5,
+                },
+              }
+            : existingProfile;
+
+          setProfile(spawnProfile);
           setScreen('world');
+
+          if (matchedHome) {
+            useGameStore.getState().pushToast(
+              `Welcome Home to ${matchedHome.name}!`,
+              matchedHome.ownerInstagram
+                ? `Matched @${matchedHome.ownerInstagram} — arrived directly at your residence.`
+                : 'Arrived directly at your Green Valley residence.',
+              'emerald',
+            );
+          }
+
+          // Auto-show Daily Login Reward modal when today's bonus has not yet been claimed
+          if (spawnProfile.lastDailyLoginDate !== getTodayDateKey()) {
+            window.setTimeout(() => {
+              const st = useGameStore.getState();
+              if (st.screen === 'world' && !st.activePanel) {
+                st.setActivePanel('daily_reward');
+              }
+            }, 900);
+          }
         } else {
           setProfile(null);
           setScreen('character', false);
         }
+
+        // Hydrate secondary collections asynchronously in the background without blocking UI
+        void Promise.all([
+          loadWorldProperties().then(setWorldProperties).catch(() => {}),
+          loadCustomShops().then(setCustomShops).catch(() => {}),
+          loadWalletTransactions(user.uid).then(setTransactions).catch(() => {}),
+        ]);
       } catch (err) {
         console.error('Error hydrating player profile:', err);
         setScreen('character', false);
@@ -88,9 +124,10 @@ function GameShell() {
     };
   }, [
     resetForLogout,
-    setAdminSession,
+    setIsAdmin,
     setAuthUser,
     setCustomHomes,
+    setCustomShops,
     setProfile,
     setScreen,
     setTransactions,
@@ -101,14 +138,18 @@ function GameShell() {
   useEffect(() => {
     if (screen !== 'world' || !firebaseUser || !profile) return;
 
-    const knownProps = Object.values(useGameStore.getState().worldProperties);
-    const knownHomes = Object.values(useGameStore.getState().customHomes);
-    void multiplayer.connect(firebaseUser, profile, knownProps, knownHomes);
+    const st = useGameStore.getState();
+    void multiplayer.connect(
+      firebaseUser,
+      profile,
+      Object.values(st.worldProperties),
+      Object.values(st.customHomes),
+      Object.values(st.customShops),
+    );
 
     return () => {
       multiplayer.disconnect();
     };
-    // Only reconnect when switching into/out of world or changing authenticated user
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [screen, firebaseUser?.uid]);
 
@@ -117,7 +158,7 @@ function GameShell() {
       <div className="w-full h-screen bg-[#0b1014] text-[#f4f7f5] flex flex-col items-center justify-center gap-3">
         <div className="w-8 h-8 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
         <p className="font-display text-sm font-medium text-slate-300">
-          Loading TYPIXEL OPEN WORLD...
+          Entering Green Valley...
         </p>
       </div>
     );

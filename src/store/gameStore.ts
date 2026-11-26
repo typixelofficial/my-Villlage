@@ -4,10 +4,12 @@ import type {
   ActiveWorkShift,
   ChatMessage,
   CustomHomeDef,
+  CustomShopDef,
   EmoteType,
   FriendRequest,
   GameToast,
   InteractablePrompt,
+  MingleEventState,
   NetworkPlayer,
   PlayerProfile,
   TimeOfDayMode,
@@ -16,7 +18,7 @@ import type {
   WeatherMode,
   WorldPropertyOwnership,
 } from '../shared/types.ts';
-import { INITIAL_VEHICLES, MISSIONS } from '../shared/worldData.ts';
+import { INITIAL_VEHICLES, MINGLE_MEETUP_LOCATIONS, MISSIONS } from '../shared/worldData.ts';
 
 export type ScreenMode = 'loading' | 'login' | 'character' | 'world';
 export type ActivePanel =
@@ -26,6 +28,11 @@ export type ActivePanel =
   | 'works'
   | 'properties'
   | 'businesses'
+  | 'shops'
+  | 'player_shop'
+  | 'building'
+  | 'mingle'
+  | 'daily_reward'
   | 'vehicles'
   | 'friends'
   | 'inventory'
@@ -36,11 +43,26 @@ export type ActivePanel =
   | 'pause'
   | 'npc';
 
+export interface VoicePeerState {
+  uid: string;
+  muted: boolean;
+  speaking: boolean;
+  connected: boolean;
+}
+
 interface ActiveNpcDialog {
   name: string;
   role: string;
   dialogue: string;
   canHeal?: boolean;
+}
+
+function getNextHourMs(): number {
+  const now = new Date();
+  const next = new Date(now);
+  next.setMinutes(0, 0, 0);
+  next.setHours(next.getHours() + 1);
+  return next.getTime();
 }
 
 interface GameState {
@@ -50,7 +72,6 @@ interface GameState {
   screen: ScreenMode;
   isEditingExistingCharacter: boolean;
   isAdmin: boolean;
-  adminToken: string | null;
   pendingInstagramDraft: string;
 
   // Player Profile & Local Live State
@@ -58,6 +79,9 @@ interface GameState {
   health: number;
   activeVehicleId: string | null;
   pendingVehiclePromptId: string | null;
+  activeBuildingId: string | null;
+  activeCustomShopId: string | null;
+  showWorldMapModal: boolean;
   localSpeedKmh: number;
   localAltitude: number;
   currentDistrictName: string;
@@ -70,9 +94,21 @@ interface GameState {
   vehicles: Record<string, VehicleState>;
   worldProperties: Record<string, WorldPropertyOwnership>;
   customHomes: Record<string, CustomHomeDef>;
+  customShops: Record<string, CustomShopDef>;
+  mingleEvent: MingleEventState;
   chatMessages: ChatMessage[];
-  chatChannel: 'global' | 'proximity';
+  chatChannel: 'global' | 'proximity' | 'direct';
+  directChatTargetUid: string | null;
+  unreadChatCount: number;
   friendRequests: FriendRequest[];
+
+  // Live Multiplayer Voice Chat (WebRTC)
+  voiceJoined: boolean;
+  voiceMuted: boolean;
+  voiceMode: 'global' | 'proximity';
+  voiceError: string | null;
+  localSpeaking: boolean;
+  voicePeers: Record<string, VoicePeerState>;
 
   // Economy, Works, Rewards & Missions
   activeMissionId: string | null;
@@ -102,14 +138,22 @@ interface GameState {
   // Actions
   setAuthUser: (user: User | null, ready: boolean) => void;
   setScreen: (screen: ScreenMode, editingExisting?: boolean) => void;
-  setAdminSession: (isAdmin: boolean, adminToken: string | null) => void;
+  setIsAdmin: (isAdmin: boolean) => void;
   setPendingInstagramDraft: (handle: string) => void;
   setProfile: (profile: PlayerProfile | null) => void;
   patchProfile: (partial: Partial<PlayerProfile>) => void;
   setHealth: (hp: number) => void;
   setActiveVehicleId: (id: string | null) => void;
   openVehiclePrompt: (vehicleId: string) => void;
-  setTelemetry: (speedKmh: number, altitude: number, districtName: string, pos: { x: number; y: number; z: number; rotY: number }) => void;
+  openBuildingPanel: (buildingId: string) => void;
+  openPlayerShopPanel: (shopId: string) => void;
+  setShowWorldMapModal: (open: boolean) => void;
+  setTelemetry: (
+    speedKmh: number,
+    altitude: number,
+    districtName: string,
+    pos: { x: number; y: number; z: number; rotY: number },
+  ) => void;
   setSocketConnected: (connected: boolean) => void;
   setSessionReplacedMessage: (msg: string | null) => void;
   setRemotePlayers: (players: Record<string, NetworkPlayer>) => void;
@@ -122,10 +166,28 @@ interface GameState {
   setCustomHomes: (homes: Record<string, CustomHomeDef>) => void;
   upsertCustomHome: (home: CustomHomeDef) => void;
   removeCustomHome: (homeId: string) => void;
+  setCustomShops: (shops: Record<string, CustomShopDef>) => void;
+  upsertCustomShop: (shop: CustomShopDef) => void;
+  removeCustomShop: (shopId: string) => void;
+  setMingleEvent: (ev: MingleEventState) => void;
+  patchMingleEvent: (partial: Partial<MingleEventState>) => void;
   addChatMessage: (msg: ChatMessage) => void;
-  setChatChannel: (ch: 'global' | 'proximity') => void;
+  setChatChannel: (ch: 'global' | 'proximity' | 'direct') => void;
+  setDirectChatTargetUid: (uid: string | null) => void;
+  clearUnreadChat: () => void;
   addFriendRequest: (req: FriendRequest) => void;
   removeFriendRequest: (fromUid: string) => void;
+
+  // Voice Actions
+  setVoiceJoined: (joined: boolean) => void;
+  setVoiceMuted: (muted: boolean) => void;
+  setVoiceMode: (mode: 'global' | 'proximity') => void;
+  setVoiceError: (err: string | null) => void;
+  setLocalSpeaking: (speaking: boolean) => void;
+  upsertVoicePeer: (uid: string, patch: Partial<VoicePeerState>) => void;
+  removeVoicePeer: (uid: string) => void;
+  resetVoiceState: () => void;
+
   setActiveMissionId: (id: string | null) => void;
   setActiveWorkShift: (shift: ActiveWorkShift | null) => void;
   setWaypointTarget: (wp: { x: number; z: number; label: string } | null) => void;
@@ -155,19 +217,29 @@ for (const v of INITIAL_VEHICLES) {
   initialVehiclesMap[v.id] = { ...v };
 }
 
+const defaultMingle: MingleEventState = {
+  nextEventAtMs: getNextHourMs(),
+  alarmActive: false,
+  locationName: MINGLE_MEETUP_LOCATIONS[0].name,
+  locationPos: MINGLE_MEETUP_LOCATIONS[0].pos,
+  activeMatch: null,
+};
+
 export const useGameStore = create<GameState>((set) => ({
   authReady: false,
   firebaseUser: null,
   screen: 'loading',
   isEditingExistingCharacter: false,
   isAdmin: false,
-  adminToken: null,
   pendingInstagramDraft: '',
 
   profile: null,
   health: 100,
   activeVehicleId: null,
   pendingVehiclePromptId: null,
+  activeBuildingId: null,
+  activeCustomShopId: null,
+  showWorldMapModal: false,
   localSpeedKmh: 0,
   localAltitude: 0,
   currentDistrictName: 'Central Fountain Square',
@@ -179,9 +251,20 @@ export const useGameStore = create<GameState>((set) => ({
   vehicles: initialVehiclesMap,
   worldProperties: {},
   customHomes: {},
+  customShops: {},
+  mingleEvent: defaultMingle,
   chatMessages: [],
   chatChannel: 'global',
+  directChatTargetUid: null,
+  unreadChatCount: 0,
   friendRequests: [],
+
+  voiceJoined: false,
+  voiceMuted: false,
+  voiceMode: 'global',
+  voiceError: null,
+  localSpeaking: false,
+  voicePeers: {},
 
   activeMissionId: MISSIONS[0].id,
   activeWorkShift: null,
@@ -208,7 +291,7 @@ export const useGameStore = create<GameState>((set) => ({
   setAuthUser: (firebaseUser, authReady) => set({ firebaseUser, authReady }),
   setScreen: (screen, editingExisting = false) =>
     set({ screen, isEditingExistingCharacter: editingExisting }),
-  setAdminSession: (isAdmin, adminToken) => set({ isAdmin, adminToken }),
+  setIsAdmin: (isAdmin) => set({ isAdmin }),
   setPendingInstagramDraft: (pendingInstagramDraft) => set({ pendingInstagramDraft }),
   setProfile: (profile) =>
     set((s) => {
@@ -229,6 +312,11 @@ export const useGameStore = create<GameState>((set) => ({
   setActiveVehicleId: (activeVehicleId) => set({ activeVehicleId }),
   openVehiclePrompt: (vehicleId) =>
     set({ pendingVehiclePromptId: vehicleId, activePanel: 'vehicle_prompt' }),
+  openBuildingPanel: (buildingId) =>
+    set({ activeBuildingId: buildingId, activePanel: 'building' }),
+  openPlayerShopPanel: (shopId) =>
+    set({ activeCustomShopId: shopId, activePanel: 'player_shop' }),
+  setShowWorldMapModal: (showWorldMapModal) => set({ showWorldMapModal }),
   setTelemetry: (localSpeedKmh, localAltitude, currentDistrictName, localPos) =>
     set({ localSpeedKmh, localAltitude, currentDistrictName, localPos }),
   setSocketConnected: (socketConnected) => set({ socketConnected }),
@@ -242,7 +330,13 @@ export const useGameStore = create<GameState>((set) => ({
     set((s) => {
       const next = { ...s.remotePlayers };
       delete next[uid];
-      return { remotePlayers: next };
+      const nextVoice = { ...s.voicePeers };
+      delete nextVoice[uid];
+      return {
+        remotePlayers: next,
+        voicePeers: nextVoice,
+        directChatTargetUid: s.directChatTargetUid === uid ? null : s.directChatTargetUid,
+      };
     }),
   setVehicles: (vehiclesList) =>
     set(() => {
@@ -270,12 +364,45 @@ export const useGameStore = create<GameState>((set) => ({
       delete next[homeId];
       return { customHomes: next };
     }),
+  setCustomShops: (customShops) => set({ customShops }),
+  upsertCustomShop: (shop) =>
+    set((s) => ({
+      customShops: { ...s.customShops, [shop.shopId]: shop },
+    })),
+  removeCustomShop: (shopId) =>
+    set((s) => {
+      const next = { ...s.customShops };
+      delete next[shopId];
+      return { customShops: next };
+    }),
+  setMingleEvent: (mingleEvent) => set({ mingleEvent }),
+  patchMingleEvent: (partial) =>
+    set((s) => ({ mingleEvent: { ...s.mingleEvent, ...partial } })),
   addChatMessage: (msg) =>
     set((s) => {
       if (s.chatMessages.some((m) => m.id === msg.id)) return s;
-      return { chatMessages: [...s.chatMessages.slice(-79), msg] };
+      const shouldCountUnread =
+        s.activePanel !== 'chat' &&
+        msg.channel !== 'system' &&
+        msg.uid !== s.firebaseUser?.uid;
+      return {
+        chatMessages: [...s.chatMessages.slice(-99), msg],
+        unreadChatCount: shouldCountUnread
+          ? Math.min(99, s.unreadChatCount + 1)
+          : s.unreadChatCount,
+      };
     }),
   setChatChannel: (chatChannel) => set({ chatChannel }),
+  setDirectChatTargetUid: (directChatTargetUid) =>
+    set((s) => ({
+      directChatTargetUid,
+      chatChannel: directChatTargetUid
+        ? 'direct'
+        : s.chatChannel === 'direct'
+          ? 'global'
+          : s.chatChannel,
+    })),
+  clearUnreadChat: () => set({ unreadChatCount: 0 }),
   addFriendRequest: (req) =>
     set((s) => {
       if (s.friendRequests.some((r) => r.fromUid === req.fromUid)) return s;
@@ -285,6 +412,42 @@ export const useGameStore = create<GameState>((set) => ({
     set((s) => ({
       friendRequests: s.friendRequests.filter((r) => r.fromUid !== fromUid),
     })),
+
+  setVoiceJoined: (voiceJoined) => set({ voiceJoined }),
+  setVoiceMuted: (voiceMuted) => set({ voiceMuted }),
+  setVoiceMode: (voiceMode) => set({ voiceMode }),
+  setVoiceError: (voiceError) => set({ voiceError }),
+  setLocalSpeaking: (localSpeaking) => set({ localSpeaking }),
+  upsertVoicePeer: (uid, patch) =>
+    set((s) => {
+      const prev = s.voicePeers[uid] || {
+        uid,
+        muted: false,
+        speaking: false,
+        connected: false,
+      };
+      return {
+        voicePeers: {
+          ...s.voicePeers,
+          [uid]: { ...prev, ...patch, uid },
+        },
+      };
+    }),
+  removeVoicePeer: (uid) =>
+    set((s) => {
+      const next = { ...s.voicePeers };
+      delete next[uid];
+      return { voicePeers: next };
+    }),
+  resetVoiceState: () =>
+    set({
+      voiceJoined: false,
+      voiceMuted: false,
+      voiceError: null,
+      localSpeaking: false,
+      voicePeers: {},
+    }),
+
   setActiveMissionId: (activeMissionId) => set({ activeMissionId }),
   setActiveWorkShift: (activeWorkShift) => set({ activeWorkShift }),
   setWaypointTarget: (waypointTarget) => set({ waypointTarget }),
@@ -301,7 +464,11 @@ export const useGameStore = create<GameState>((set) => ({
     })),
   setDailyRewardReadyAt: (dailyRewardReadyAt) => set({ dailyRewardReadyAt }),
   setNearbyPrompt: (nearbyPrompt) => set({ nearbyPrompt }),
-  setActivePanel: (activePanel) => set({ activePanel }),
+  setActivePanel: (activePanel) =>
+    set((s) => ({
+      activePanel,
+      unreadChatCount: activePanel === 'chat' ? 0 : s.unreadChatCount,
+    })),
   openNpcDialog: (activeNpcDialog) => set({ activeNpcDialog, activePanel: 'npc' }),
   toggleHudCollapsed: () => set((s) => ({ hudCollapsed: !s.hudCollapsed })),
   pushToast: (title, detail, tone = 'emerald') => {
@@ -327,14 +494,25 @@ export const useGameStore = create<GameState>((set) => ({
       profile: null,
       screen: 'login',
       isAdmin: false,
-      adminToken: null,
       activeVehicleId: null,
       pendingVehiclePromptId: null,
+      activeBuildingId: null,
+      activeCustomShopId: null,
+      showWorldMapModal: false,
       activeWorkShift: null,
       waypointTarget: null,
       remotePlayers: {},
+      customShops: {},
+      mingleEvent: defaultMingle,
       chatMessages: [],
+      directChatTargetUid: null,
+      unreadChatCount: 0,
       friendRequests: [],
+      voiceJoined: false,
+      voiceMuted: false,
+      voiceError: null,
+      localSpeaking: false,
+      voicePeers: {},
       activePanel: null,
       nearbyPrompt: null,
       socketConnected: false,

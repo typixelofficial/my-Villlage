@@ -1,12 +1,42 @@
 export type Gender = 'male' | 'female';
-export type HairStyle = 'short' | 'long' | 'spiky' | 'bob' | 'ponytail';
-export type ShirtStyle = 'tee' | 'jacket' | 'hoodie' | 'polo';
+export type HairStyle =
+  | 'short'
+  | 'long'
+  | 'spiky'
+  | 'bob'
+  | 'ponytail'
+  | 'braids'
+  | 'fade'
+  | 'curly';
+export type ShirtStyle =
+  | 'tee'
+  | 'jacket'
+  | 'hoodie'
+  | 'polo'
+  | 'shirt'
+  | 'mundu'
+  | 'dress'
+  | 'kurti'
+  | 'lehenga';
 export type AccessoryType = 'none' | 'glasses' | 'cap' | 'backpack' | 'headphones';
-export type AnimationState = 'idle' | 'walk' | 'run' | 'jump' | 'drive' | 'wave' | 'dance' | 'cheer' | 'sit' | 'clap';
+export type AnimationState =
+  | 'idle'
+  | 'walk'
+  | 'run'
+  | 'jump'
+  | 'drive'
+  | 'wave'
+  | 'dance'
+  | 'cheer'
+  | 'sit'
+  | 'clap';
 export type EmoteType = 'wave' | 'dance' | 'cheer' | 'sit' | 'clap';
 export type InteriorTheme = 'modern' | 'cozy' | 'minimal' | 'luxury';
 export type GardenStyle = 'flowers' | 'zen' | 'poolside' | 'orchard';
 export type CustomHomeStyle = 'cabin' | 'modern' | 'villa' | 'manor';
+export type CustomShopType = 'tea_stall' | 'juice_bar' | 'bakery' | 'boutique' | 'tech_shop';
+export type RelationshipStatus = 'single' | 'mingle' | 'married';
+export type LocationCategory = 'favorite' | 'home' | 'hangout' | 'tea' | 'event';
 export type WeatherMode = 'clear' | 'breeze' | 'rain' | 'mist';
 export type TimeOfDayMode = 'cycle' | 'morning' | 'noon' | 'golden' | 'night';
 
@@ -39,11 +69,30 @@ export interface Vec3 {
   z: number;
 }
 
+export interface CustomLocationPin {
+  id: string;
+  name: string;
+  category: LocationCategory;
+  x: number;
+  z: number;
+}
+
 export interface PlayerProfile {
   uid: string;
   displayName: string;
   instagramId: string;
   photoURL: string;
+  age: number;
+  relationshipStatus: RelationshipStatus;
+  partnerUid: string;
+  partnerName: string;
+  partnerInstagram: string;
+  lastDailyLoginDate: string;
+  dailyLoginStreak: number;
+  totalDailyLogins: number;
+  followedOfficial: boolean;
+  followedStudio: boolean;
+  customLocations: CustomLocationPin[];
   appearance: CharacterAppearance;
   greenCoins: number;
   level: number;
@@ -73,6 +122,9 @@ export interface NetworkPlayer {
   displayName: string;
   instagramId: string;
   photoURL: string;
+  age?: number;
+  relationshipStatus?: RelationshipStatus;
+  partnerName?: string;
   appearance: CharacterAppearance;
   x: number;
   y: number;
@@ -86,9 +138,18 @@ export interface NetworkPlayer {
   chatBubbleUntil?: number;
   level: number;
   isAdmin?: boolean;
+  voiceActive?: boolean;
+  voiceMuted?: boolean;
 }
 
-export type VehicleKind = 'electric' | 'sports' | 'suv' | 'motorcycle' | 'bicycle' | 'flying_taxi';
+export type VehicleKind =
+  | 'electric'
+  | 'sports'
+  | 'suv'
+  | 'motorcycle'
+  | 'bicycle'
+  | 'flying_taxi'
+  | 'ksrtc_bus';
 
 export interface VehicleState {
   id: string;
@@ -157,6 +218,124 @@ export interface CustomHomePlan {
   size: Vec3;
   defaultPool: boolean;
   description: string;
+}
+
+export interface CustomShopDef {
+  shopId: string;
+  name: string;
+  shopType: CustomShopType;
+  ownerUid: string;
+  ownerName: string;
+  ownerInstagram: string;
+  awningColor: string;
+  x: number;
+  y: number;
+  z: number;
+  totalSales: number;
+}
+
+export interface CustomShopPlan {
+  shopType: CustomShopType;
+  label: string;
+  price: number;
+  defaultAwning: string;
+  description: string;
+  menuItems: { id: string; name: string; price: number; healthRestore: number; xp: number }[];
+}
+
+export interface ActiveBuildingDef {
+  id: string;
+  name: string;
+  category:
+    | 'hospital'
+    | 'mall'
+    | 'bank'
+    | 'school'
+    | 'college'
+    | 'library'
+    | 'cinema'
+    | 'gym'
+    | 'ksrtc_depot'
+    | 'airport'
+    | 'wedding_hall'
+    | 'honeymoon_resort';
+  doorPosition: Vec3;
+  subtitle: string;
+  description: string;
+  accent: string;
+  services: {
+    id: string;
+    label: string;
+    description: string;
+    cost: number;
+    rewardCoins?: number;
+    rewardXp?: number;
+    healthRestore?: number;
+    teleportTo?: Vec3;
+    teleportLabel?: string;
+    openPanel?: 'inventory' | 'wallet' | 'mingle' | 'vehicles';
+  }[];
+}
+
+export interface ShowcaseAdItem {
+  id: string;
+  filename: string;
+  title: string;
+  subtitle: string;
+  imageUrl: string;
+  instagramUrl: string;
+}
+
+export interface MingleParticipant {
+  uid: string;
+  displayName: string;
+  instagramId: string;
+  photoURL: string;
+  age: number;
+  gender: Gender;
+  relationshipStatus: RelationshipStatus;
+  appearance: CharacterAppearance;
+  joinedAt: number;
+  isOnline: boolean;
+  isNpc?: boolean;
+}
+
+export interface MingleSelectedPair {
+  matchId: string;
+  memberA: MingleParticipant;
+  memberB: MingleParticipant;
+  selectedAt: number;
+  locationName: string;
+  locationPos: Vec3;
+  status: 'proposed' | 'married' | 'honeymoon';
+  memberAAccepted: boolean;
+  memberBAccepted: boolean;
+  feastServed?: boolean;
+}
+
+export interface MingleEventState {
+  nextEventAtMs: number;
+  alarmActive: boolean;
+  locationName: string;
+  locationPos: Vec3;
+  isJoined?: boolean;
+  joinedAccounts?: MingleParticipant[];
+  selectedPair?: MingleSelectedPair | null;
+  activeMatch: {
+    matchId: string;
+    partnerUid: string;
+    partnerName: string;
+    partnerInstagram: string;
+    partnerPhotoURL?: string;
+    partnerAppearance?: CharacterAppearance;
+    partnerAge: number;
+    partnerGender: Gender;
+    isNpcPartner: boolean;
+    myAccepted: boolean;
+    partnerAccepted: boolean;
+    status: 'proposed' | 'accepted' | 'married' | 'honeymoon' | 'declined';
+    feastServed?: boolean;
+  } | null;
 }
 
 export interface BusinessDef {
@@ -242,8 +421,12 @@ export interface ChatMessage {
   id: string;
   uid: string;
   displayName: string;
+  instagramId?: string;
+  isAdmin?: boolean;
   photoURL: string;
-  channel: 'global' | 'proximity' | 'system';
+  channel: 'global' | 'proximity' | 'direct' | 'system';
+  targetUid?: string;
+  targetName?: string;
   text: string;
   timestamp: number;
 }
@@ -257,7 +440,18 @@ export interface FriendRequest {
 
 export interface InteractablePrompt {
   id: string;
-  type: 'vehicle' | 'property' | 'custom_home' | 'business' | 'atm' | 'npc' | 'mission' | 'work' | 'shop';
+  type:
+    | 'vehicle'
+    | 'property'
+    | 'custom_home'
+    | 'custom_shop'
+    | 'building'
+    | 'business'
+    | 'atm'
+    | 'npc'
+    | 'mission'
+    | 'work'
+    | 'shop';
   label: string;
   sublabel?: string;
   targetId: string;
@@ -281,5 +475,17 @@ export const DEFAULT_APPEARANCE: CharacterAppearance = {
   shirtColor: '#1f7a5c',
   pantsColor: '#283344',
   shoeColor: '#e5e7eb',
+  accessory: 'none',
+};
+
+export const DEFAULT_FEMALE_APPEARANCE: CharacterAppearance = {
+  gender: 'female',
+  skinTone: '#e8be9e',
+  hairStyle: 'long',
+  hairColor: '#2c221e',
+  shirtStyle: 'dress',
+  shirtColor: '#e11d48',
+  pantsColor: '#fda4af',
+  shoeColor: '#f8fafc',
   accessory: 'none',
 };

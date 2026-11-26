@@ -6,6 +6,7 @@ import type {
   InteractablePrompt,
 } from '../shared/types.ts';
 import {
+  ACTIVE_BUILDINGS,
   ATM_LOCATIONS,
   BUSINESSES,
   MISSIONS,
@@ -16,6 +17,7 @@ import {
 } from '../shared/worldData.ts';
 import { useGameStore } from '../store/gameStore.ts';
 import { multiplayer } from '../lib/multiplayer.ts';
+import { voiceChat } from '../lib/voiceChat.ts';
 import { syncPlayerProgressToFirestore } from '../lib/firebase.ts';
 import { playSfx } from '../game/audio.ts';
 import {
@@ -24,7 +26,11 @@ import {
   setupStudioEnvironment,
 } from '../game/glUtils.ts';
 import { WorldPhysics } from '../game/physics.ts';
-import { buildCustomHomeMesh, buildGreenValleyWorld } from '../game/worldBuilder.ts';
+import {
+  buildCustomHomeMesh,
+  buildCustomShopMesh,
+  buildGreenValleyWorld,
+} from '../game/worldBuilder.ts';
 import {
   animateCharacterRig,
   buildCharacterRig,
@@ -57,6 +63,7 @@ interface RemoteVisual {
   lastDisplayName: string;
   lastInstagramId: string;
   lastChatBubble: string;
+  lastVoiceTag: string;
   pos: THREE.Vector3;
   rotY: number;
 }
@@ -109,7 +116,14 @@ export function WorldViewport({
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.08;
     renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2));
-    renderer.setSize(container.clientWidth, container.clientHeight);
+    renderer.domElement.style.width = '100%';
+    renderer.domElement.style.height = '100%';
+    renderer.domElement.style.display = 'block';
+    renderer.setSize(
+      Math.max(1, container.clientWidth),
+      Math.max(1, container.clientHeight),
+      false,
+    );
     renderer.shadowMap.enabled = !isSoftwareGl;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     container.innerHTML = '';
@@ -209,6 +223,9 @@ export function WorldViewport({
     // Dynamic Custom 3D Homes Map (player-built & admin-built)
     const customHomeVisuals = new Map<string, { group: THREE.Group; dispose: () => void }>();
 
+    // Dynamic Custom 3D Player Shops Map (Tea Stalls, Juice Bars, Bakeries, Boutiques, Tech)
+    const customShopVisuals = new Map<string, { group: THREE.Group; dispose: () => void }>();
+
     // Track property sign updates
     const appliedPropertyOwners = new Map<string, string>();
 
@@ -254,10 +271,10 @@ export function WorldViewport({
         if (!veh) return;
         const isFree = veh.rentPrice <= 0 && veh.buyPrice <= 0;
         const isOwned = Boolean(store.profile?.ownedVehicles.includes(veh.id));
-        if (isFree || isOwned) {
+        if (store.isAdmin || isFree || isOwned) {
           multiplayer.enterVehicle(veh.id, 'free');
         } else {
-          // Walked up to a paid vehicle -> open Rent vs Buy Permanently dialog!
+          // Normal player walked up to a paid vehicle -> open Rent vs Buy Permanently dialog
           store.openVehiclePrompt(veh.id);
         }
       } else if (prompt.type === 'work') {
@@ -280,6 +297,10 @@ export function WorldViewport({
         } else {
           store.setActivePanel('businesses');
         }
+      } else if (prompt.type === 'building') {
+        store.openBuildingPanel(prompt.targetId);
+      } else if (prompt.type === 'custom_shop') {
+        store.openPlayerShopPanel(prompt.targetId);
       } else if (prompt.type === 'atm') {
         store.setActivePanel('wallet');
       } else if (prompt.type === 'shop') {
@@ -308,7 +329,9 @@ export function WorldViewport({
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.code === 'Escape') {
         const st = useGameStore.getState();
-        if (st.activePanel) {
+        if (st.showWorldMapModal) {
+          st.setShowWorldMapModal(false);
+        } else if (st.activePanel) {
           st.setActivePanel(null);
         } else {
           st.setActivePanel('pause');
@@ -321,8 +344,13 @@ export function WorldViewport({
 
       if (e.code === 'KeyE') {
         handleInteract();
+      } else if (e.code === 'KeyM') {
+        const st = useGameStore.getState();
+        st.setShowWorldMapModal(!st.showWorldMapModal);
       } else if (e.code === 'KeyH') {
         useGameStore.getState().toggleHudCollapsed();
+      } else if (e.code === 'KeyV') {
+        voiceChat.toggleMute();
       } else if (e.code === 'KeyT' || e.code === 'Enter') {
         e.preventDefault();
         useGameStore.getState().setActivePanel('chat');
@@ -379,13 +407,23 @@ export function WorldViewport({
     };
     renderer.domElement.addEventListener('webglcontextlost', onContextLost);
 
+    let lastResizeW = Math.max(1, container.clientWidth);
+    let lastResizeH = Math.max(1, container.clientHeight);
+    let resizeRafId = 0;
     const onResize = () => {
-      if (!container) return;
-      const w = Math.max(1, container.clientWidth);
-      const h = Math.max(1, container.clientHeight);
-      camera.aspect = w / h;
-      camera.updateProjectionMatrix();
-      renderer.setSize(w, h);
+      if (resizeRafId) cancelAnimationFrame(resizeRafId);
+      resizeRafId = requestAnimationFrame(() => {
+        resizeRafId = 0;
+        if (!container) return;
+        const w = Math.max(1, container.clientWidth);
+        const h = Math.max(1, container.clientHeight);
+        if (w === lastResizeW && h === lastResizeH) return;
+        lastResizeW = w;
+        lastResizeH = h;
+        camera.aspect = w / h;
+        camera.updateProjectionMatrix();
+        renderer.setSize(w, h, false);
+      });
     };
     const ro = new ResizeObserver(onResize);
     ro.observe(container);
@@ -542,8 +580,12 @@ export function WorldViewport({
           nextX,
           driveState.y,
           nextZ,
-          activeVeh.kind === 'motorcycle' || activeVeh.kind === 'bicycle' ? 0.95 : 1.75,
-          2.0,
+          activeVeh.kind === 'ksrtc_bus'
+            ? 2.2
+            : activeVeh.kind === 'motorcycle' || activeVeh.kind === 'bicycle'
+              ? 0.95
+              : 1.75,
+          activeVeh.kind === 'ksrtc_bus' ? 3.2 : 2.0,
         );
         if (resolved.collided) {
           driveState.speed *= 0.25;
@@ -678,8 +720,12 @@ export function WorldViewport({
       }
 
       // 7. Update Third-Person Follow Camera with Collision Clamping
-      const targetHeight = activeVeh ? 1.85 : 1.55;
-      const dist = activeVeh ? Math.max(8.5, camState.distance + 2.2) : camState.distance;
+      const targetHeight = activeVeh ? (activeVeh.kind === 'ksrtc_bus' ? 2.6 : 1.85) : 1.55;
+      const dist = activeVeh
+        ? activeVeh.kind === 'ksrtc_bus'
+          ? Math.max(12.8, camState.distance + 4.8)
+          : Math.max(8.5, camState.distance + 2.2)
+        : camState.distance;
       _camTarget.set(playerState.x, playerState.y + targetHeight, playerState.z);
       const horiz = Math.cos(camState.pitch) * dist;
       const vert = Math.sin(camState.pitch) * dist;
@@ -736,8 +782,14 @@ export function WorldViewport({
       for (const rp of Object.values(remotes)) {
         const appKey = JSON.stringify(rp.appearance);
         let vis = remoteVisuals.get(rp.uid);
-        const subline = `Lv.${rp.level}${rp.instagramId ? ` · @${rp.instagramId}` : ''}${rp.isAdmin ? ' · ADMIN' : ''}`;
-        const accentColor = rp.isAdmin ? '#f59e0b' : '#38bdf8';
+        const vp = store.voicePeers[rp.uid];
+        const voiceTag = vp?.speaking
+          ? 'TALKING'
+          : rp.voiceActive || vp
+            ? (vp?.muted || rp.voiceMuted ? 'MIC MUTED' : 'VOICE')
+            : '';
+        const subline = `Lv.${rp.level}${rp.instagramId ? ` · @${rp.instagramId}` : ''}${rp.isAdmin ? ' · ADMIN' : ''}${voiceTag ? ` · ${voiceTag}` : ''}`;
+        const accentColor = vp?.speaking ? '#10b981' : rp.isAdmin ? '#f59e0b' : '#38bdf8';
 
         if (!vis || vis.appearanceKey !== appKey) {
           if (vis) {
@@ -759,23 +811,26 @@ export function WorldViewport({
             lastDisplayName: rp.displayName,
             lastInstagramId: rp.instagramId || '',
             lastChatBubble: rp.chatBubble || '',
+            lastVoiceTag: voiceTag,
             pos: new THREE.Vector3(rp.x, rp.y, rp.z),
             rotY: rp.rotY,
           };
           remoteVisuals.set(rp.uid, vis);
         }
 
-        // Update nameplate if display name, Instagram handle, or live chat bubble changed
+        // Update nameplate if display name, Instagram handle, voice state, or live chat bubble changed
         const nextBubble = rp.chatBubble || '';
         const nextInsta = rp.instagramId || '';
         if (
           vis.lastDisplayName !== rp.displayName ||
           vis.lastInstagramId !== nextInsta ||
-          vis.lastChatBubble !== nextBubble
+          vis.lastChatBubble !== nextBubble ||
+          vis.lastVoiceTag !== voiceTag
         ) {
           vis.lastDisplayName = rp.displayName;
           vis.lastInstagramId = nextInsta;
           vis.lastChatBubble = nextBubble;
+          vis.lastVoiceTag = voiceTag;
           const canvas = vis.plate.userData.canvas as HTMLCanvasElement | undefined;
           if (canvas) {
             updateNameplateCanvas(
@@ -827,6 +882,33 @@ export function WorldViewport({
             built.size.z,
           );
           customHomeVisuals.set(home.homeId, { group: built.group, dispose: built.dispose });
+        }
+      }
+
+      // 9c. Sync Dynamic Custom 3D Player Shops (Kerala Tea Stalls, Juice Bars, Bakeries, etc.)
+      const customShopsMap = store.customShops;
+      for (const [shopId, vis] of customShopVisuals.entries()) {
+        if (!customShopsMap[shopId]) {
+          scene.remove(vis.group);
+          vis.dispose();
+          physics.removeStaticBox(`cshop-${shopId}`);
+          customShopVisuals.delete(shopId);
+        }
+      }
+      for (const shop of Object.values(customShopsMap)) {
+        if (!customShopVisuals.has(shop.shopId)) {
+          const built = buildCustomShopMesh(shop);
+          scene.add(built.group);
+          physics.addStaticBox(
+            `cshop-${shop.shopId}`,
+            shop.x,
+            shop.y + built.size.y * 0.5,
+            shop.z,
+            built.size.x,
+            built.size.y,
+            built.size.z,
+          );
+          customShopVisuals.set(shop.shopId, { group: built.group, dispose: built.dispose });
         }
       }
 
@@ -1040,12 +1122,15 @@ export function WorldViewport({
               bestPrompt = {
                 id: `prompt-veh-${v.id}`,
                 type: 'vehicle',
-                label: isFree || isOwned ? `Drive ${v.name}` : `Rent or Buy ${v.name}`,
-                sublabel: isFree
-                  ? 'Free Walk-Up Vehicle'
-                  : isOwned
-                    ? 'Owned Vehicle · Free to Drive'
-                    : `Rent ${v.rentPrice} GC · Buy ${v.buyPrice} GC`,
+                label:
+                  store.isAdmin || isFree || isOwned ? `Drive ${v.name}` : `Rent or Buy ${v.name}`,
+                sublabel: store.isAdmin
+                  ? 'Admin Free Access'
+                  : isFree
+                    ? 'Free Walk-Up Vehicle'
+                    : isOwned
+                      ? 'Owned Vehicle · Free to Drive'
+                      : `Rent ${v.rentPrice} GC · Buy ${v.buyPrice} GC`,
                 targetId: v.id,
                 position: { x: v.x, y: v.y, z: v.z },
               };
@@ -1118,12 +1203,18 @@ export function WorldViewport({
                   ? `Customize ${prop.name}`
                   : own
                     ? `${prop.name} (${own.ownerName})`
-                    : `Buy ${prop.name}`,
+                    : store.isAdmin
+                      ? `Claim ${prop.name} (Free)`
+                      : `Buy ${prop.name}`,
                 sublabel: isMine
                   ? 'Interior & Garden Studio'
                   : own
-                    ? 'Owned Residence'
-                    : `${prop.price} Green Coins`,
+                    ? store.isAdmin
+                      ? 'Admin Can Customize'
+                      : 'Owned Residence'
+                    : store.isAdmin
+                      ? 'Admin Free Access'
+                      : `${prop.price} Green Coins`,
                 targetId: prop.id,
                 position: prop.doorPosition,
               };
@@ -1139,17 +1230,60 @@ export function WorldViewport({
               bestPrompt = {
                 id: `prompt-biz-${biz.id}`,
                 type: 'business',
-                label: isOwned ? `Collect Revenue: ${biz.name}` : `Inspect ${biz.name}`,
-                sublabel: isOwned ? `+${biz.payout} Green Coins` : `Acquire for ${biz.price} GC`,
+                label: isOwned
+                  ? `Collect Revenue: ${biz.name}`
+                  : store.isAdmin
+                    ? `Acquire ${biz.name} (Free)`
+                    : `Inspect ${biz.name}`,
+                sublabel: isOwned
+                  ? `+${biz.payout} Green Coins`
+                  : store.isAdmin
+                    ? 'Admin Free Access'
+                    : `Acquire for ${biz.price} GC`,
                 targetId: biz.id,
                 position: biz.position,
               };
             }
           }
 
-          // Mall Shop interaction
+          // Nearby Active Enterable Buildings (Hospital, Mall, Bank, School, College, Library, Cinema, Gym, KSRTC, Airport, Wedding Hall, Honeymoon Resort)
+          for (const bldg of ACTIVE_BUILDINGS) {
+            const d = Math.hypot(
+              playerState.x - bldg.doorPosition.x,
+              playerState.z - bldg.doorPosition.z,
+            );
+            if (d < 7.2 && d < bestDist) {
+              bestDist = d;
+              bestPrompt = {
+                id: `prompt-bldg-${bldg.id}`,
+                type: 'building',
+                label: `Enter ${bldg.name}`,
+                sublabel: bldg.subtitle,
+                targetId: bldg.id,
+                position: bldg.doorPosition,
+              };
+            }
+          }
+
+          // Nearby Player-Opened Custom Shops (Tea Stalls / Chaya Kada, Juice Bars, Bakeries)
+          for (const cshop of Object.values(customShopsMap)) {
+            const d = Math.hypot(playerState.x - cshop.x, playerState.z - (cshop.z + 2.2));
+            if (d < 6.2 && d < bestDist) {
+              bestDist = d;
+              bestPrompt = {
+                id: `prompt-cshop-${cshop.shopId}`,
+                type: 'custom_shop',
+                label: `Order from ${cshop.name}`,
+                sublabel: `Owner: ${cshop.ownerName}${cshop.ownerInstagram ? ` (@${cshop.ownerInstagram})` : ''}`,
+                targetId: cshop.shopId,
+                position: { x: cshop.x, y: cshop.y, z: cshop.z },
+              };
+            }
+          }
+
+          // Mall Shop interaction fallback
           const mallDist = Math.hypot(playerState.x - 58, playerState.z + 2);
-          if (mallDist < 8 && mallDist < bestDist) {
+          if (mallDist < 6.5 && mallDist < bestDist) {
             bestPrompt = {
               id: 'prompt-mall-shop',
               type: 'shop',
@@ -1201,6 +1335,7 @@ export function WorldViewport({
     return () => {
       disposed = true;
       cancelAnimationFrame(rafId);
+      if (resizeRafId) cancelAnimationFrame(resizeRafId);
       window.clearTimeout(timerId);
       ro.disconnect();
       window.removeEventListener('keydown', onKeyDown);
@@ -1218,6 +1353,7 @@ export function WorldViewport({
       for (const vis of remoteVisuals.values()) vis.rig.dispose();
       for (const vRig of vehicleRigs.values()) vRig.dispose();
       for (const ch of customHomeVisuals.values()) ch.dispose();
+      for (const cs of customShopVisuals.values()) cs.dispose();
       world.dispose();
       physics.dispose();
       envTex.dispose();

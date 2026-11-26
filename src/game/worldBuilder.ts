@@ -1,11 +1,14 @@
 import * as THREE from 'three';
-import type { CustomHomeDef } from '../shared/types.ts';
+import type { CustomHomeDef, CustomShopDef } from '../shared/types.ts';
 import {
+  ACTIVE_BUILDINGS,
   ATM_LOCATIONS,
   BUSINESSES,
   CUSTOM_HOME_PLANS,
+  CUSTOM_SHOP_PLANS,
   NPCS,
   PROPERTIES,
+  SHOWCASE_ADS,
   groundHeightAt,
 } from '../shared/worldData.ts';
 import type { WorldPhysics } from './physics.ts';
@@ -97,7 +100,8 @@ export function buildGreenValleyWorld(
   // 1. SCULPTED 840m x 840m VALLEY TERRAIN + OUTER MOUNTAIN RING
   // =========================================================================
   grassTex.repeat.set(78, 78);
-  const terrainGeo = track(new THREE.PlaneGeometry(980, 980, 150, 150));
+  // Optimized 96x96 terrain grid for fast startup while preserving smooth hills & lake basin
+  const terrainGeo = track(new THREE.PlaneGeometry(980, 980, 96, 96));
   terrainGeo.rotateX(-Math.PI / 2);
   const posAttr = terrainGeo.attributes.position;
   const colors = new Float32Array(posAttr.count * 3);
@@ -932,6 +936,181 @@ export function buildGreenValleyWorld(
   addSignboard(root, 'SUNSET VALLEY HOME PLOTS', 'Build Your Custom 3D Home Here', -182, 3.6, -14, 7.6, 1.9, Math.PI / 2, '#f472b6');
 
   // =========================================================================
+  // 8B. ROYAL WEDDING MANDAPAM (-110, -20) & LAKESIDE HONEYMOON RESORT (-78, 118)
+  // =========================================================================
+  const goldMat = track(new THREE.MeshStandardMaterial({ color: '#eab308', roughness: 0.28, metalness: 0.72 }));
+  const roseMat = track(new THREE.MeshStandardMaterial({ color: '#f43f5e', roughness: 0.55 }));
+  const creamWallMat = track(new THREE.MeshStandardMaterial({ color: '#fff7ed', roughness: 0.78 }));
+
+  // Royal Valley Wedding Mandapam
+  const wedGroup = new THREE.Group();
+  wedGroup.position.set(-110, 0, -20);
+  const wedStage = new THREE.Mesh(track(new THREE.BoxGeometry(16, 0.7, 14)), warmStoneMat);
+  wedStage.position.y = 0.35;
+  wedStage.receiveShadow = true;
+  wedGroup.add(wedStage);
+  const wedPillarGeo = track(new THREE.CylinderGeometry(0.38, 0.44, 5.8, 12));
+  for (const [px, pz] of [[-6.5, -5.5], [6.5, -5.5], [-6.5, 5.5], [6.5, 5.5], [-6.5, 0], [6.5, 0]]) {
+    const p = new THREE.Mesh(wedPillarGeo, creamWallMat);
+    p.position.set(px, 3.4, pz);
+    p.castShadow = true;
+    const cap = new THREE.Mesh(track(new THREE.CylinderGeometry(0.55, 0.4, 0.4, 12)), goldMat);
+    cap.position.set(px, 6.3, pz);
+    wedGroup.add(p, cap);
+  }
+  const wedCanopy = new THREE.Mesh(track(new THREE.BoxGeometry(16.6, 0.65, 14.6)), roseMat);
+  wedCanopy.position.y = 6.7;
+  wedCanopy.castShadow = true;
+  const wedDome = new THREE.Mesh(track(new THREE.SphereGeometry(4.2, 16, 10, 0, Math.PI * 2, 0, Math.PI * 0.5)), goldMat);
+  wedDome.position.y = 7.0;
+  // Floral Marriage Arch & Banquet Feast Table
+  const feastTable = new THREE.Mesh(track(new THREE.BoxGeometry(7.5, 0.9, 2.2)), creamWallMat);
+  feastTable.position.set(0, 1.15, -2.5);
+  const bananaLeafMat = track(new THREE.MeshStandardMaterial({ color: '#22c55e', roughness: 0.6 }));
+  for (let lx = -2.6; lx <= 2.6; lx += 1.3) {
+    const leaf = new THREE.Mesh(track(new THREE.BoxGeometry(0.85, 0.06, 0.55)), bananaLeafMat);
+    leaf.position.set(lx, 1.64, -2.5);
+    wedGroup.add(leaf);
+  }
+  wedGroup.add(wedCanopy, wedDome, feastTable);
+  addSignboard(wedGroup, 'ROYAL WEDDING MANDAPAM', 'Single-to-Mingle · Sadhya Feast', 0, 5.4, 7.4, 9.6, 2.1, 0, '#f43f5e');
+  root.add(wedGroup);
+  physics.addStaticBox('bldg-wedding-hall', -110, 3.5, -23.5, 14, 7, 5);
+
+  // Lakeside Honeymoon Resort (-78, 118)
+  const hmGroup = new THREE.Group();
+  hmGroup.position.set(-78, 0, 118);
+  const hmDeck = new THREE.Mesh(track(new THREE.BoxGeometry(15, 0.55, 12)), timberMat);
+  hmDeck.position.y = 0.28;
+  hmDeck.receiveShadow = true;
+  const hmSuite = new THREE.Mesh(track(new THREE.BoxGeometry(10, 5.2, 7.5)), creamWallMat);
+  hmSuite.position.set(0, 3.1, 1.8);
+  hmSuite.castShadow = true;
+  const hmRoof = new THREE.Mesh(track(new THREE.ConeGeometry(8.2, 3.2, 4)), roseMat);
+  hmRoof.rotation.y = Math.PI / 4;
+  hmRoof.position.set(0, 7.3, 1.8);
+  const heartArch = new THREE.Mesh(track(new THREE.TorusGeometry(2.6, 0.22, 10, 24, Math.PI)), roseMat);
+  heartArch.position.set(0, 2.5, -4.4);
+  const lanternMat = track(new THREE.MeshStandardMaterial({ color: '#fef08a', emissive: '#f59e0b', emissiveIntensity: 1.6 }));
+  for (const lx of [-5.5, -2.5, 2.5, 5.5]) {
+    const lantern = new THREE.Mesh(track(new THREE.SphereGeometry(0.32, 10, 10)), lanternMat);
+    lantern.position.set(lx, 3.6, -4.6);
+    hmGroup.add(lantern);
+  }
+  hmGroup.add(hmDeck, hmSuite, hmRoof, heartArch);
+  addSignboard(hmGroup, 'LAKESIDE HONEYMOON RESORT', 'Romantic Suite & Sunset Dining', 0, 4.7, -2.0, 8.8, 1.9, Math.PI, '#ec4899');
+  root.add(hmGroup);
+  physics.addStaticBox('bldg-honeymoon-resort', -78, 3.0, 119.8, 10.5, 6, 8);
+
+  // Glowing Interactive Entrance Portals at All 12 Active Buildings
+  const portalMatCache = new Map<string, THREE.MeshBasicMaterial>();
+  for (const bldg of ACTIVE_BUILDINGS) {
+    let pMat = portalMatCache.get(bldg.accent);
+    if (!pMat) {
+      pMat = track(
+        new THREE.MeshBasicMaterial({
+          color: bldg.accent,
+          transparent: true,
+          opacity: 0.65,
+          side: THREE.DoubleSide,
+        }),
+      );
+      portalMatCache.set(bldg.accent, pMat);
+    }
+    const ring = new THREE.Mesh(track(new THREE.RingGeometry(1.15, 1.55, 24)), pMat);
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.set(bldg.doorPosition.x, Math.max(0.08, groundHeightAt(bldg.doorPosition.x, bldg.doorPosition.z) + 0.08), bldg.doorPosition.z);
+    root.add(ring);
+  }
+
+  // =========================================================================
+  // 8C. 12 ILLUMINATED 3D SHOWCASE AD BILLBOARDS ON ALL SIDES OF GREEN VALLEY
+  // Real posters from github.com/typixelofficial/typixel/tree/main/showcase/showcase
+  // =========================================================================
+  const adTextureLoader = new THREE.TextureLoader();
+  adTextureLoader.setCrossOrigin('anonymous');
+  const billboardSpots: [number, number, number][] = [
+    // Central Plaza & Main Crossroads (All 4 Sides)
+    [16, -18, -Math.PI * 0.25],
+    [-16, -18, Math.PI * 0.25],
+    [18, 22, -Math.PI * 0.75],
+    [-18, 22, Math.PI * 0.75],
+    // North Avenue (Hospital & School Side)
+    [11, -68, -Math.PI * 0.5],
+    [-11, -138, Math.PI * 0.5],
+    // East Commercial & Mall Avenue
+    [54, -14, -Math.PI * 0.5],
+    [90, 48, Math.PI],
+    // South Highway & KSRTC Depot
+    [28, 76, -Math.PI * 0.2],
+    [14, 155, -Math.PI * 0.5],
+    // West Sunset Valley & Beach Approach
+    [-98, 12, Math.PI],
+    [-178, -32, Math.PI * 0.5],
+  ];
+
+  billboardSpots.forEach(([bx, bz, rotY], idx) => {
+    const ad = SHOWCASE_ADS[idx % SHOWCASE_ADS.length];
+    const bg = new THREE.Group();
+    const gy = Math.max(0, groundHeightAt(bx, bz));
+    bg.position.set(bx, gy, bz);
+    bg.rotation.y = rotY;
+
+    // Dual steel truss support poles
+    const legL = new THREE.Mesh(track(new THREE.CylinderGeometry(0.22, 0.26, 6.2, 8)), darkMetalMat);
+    legL.position.set(-2.6, 3.1, 0);
+    legL.castShadow = true;
+    const legR = legL.clone();
+    legR.position.x = 2.6;
+
+    // Sleek dark framing box
+    const frame = new THREE.Mesh(track(new THREE.BoxGeometry(7.8, 5.4, 0.45)), darkMetalMat);
+    frame.position.set(0, 7.6, 0);
+    frame.castShadow = true;
+
+    // Fallback branded canvas texture immediately visible while GitHub image streams in
+    const fallbackTex = track(createSignTexture(ad.title, '@typixelofficial · Showcase', '#10b981'));
+    const posterMat = track(
+      new THREE.MeshStandardMaterial({
+        map: fallbackTex,
+        emissive: '#ffffff',
+        emissiveMap: fallbackTex,
+        emissiveIntensity: 0.22,
+        roughness: 0.35,
+      }),
+    );
+
+    adTextureLoader.load(
+      ad.imageUrl,
+      (loadedTex) => {
+        loadedTex.colorSpace = THREE.SRGBColorSpace;
+        loadedTex.anisotropy = Math.min(4, maxAnisotropy);
+        posterMat.map = loadedTex;
+        posterMat.emissiveMap = loadedTex;
+        posterMat.needsUpdate = true;
+        disposables.push(loadedTex);
+      },
+      undefined,
+      () => {
+        // Keep branded fallback texture if offline
+      },
+    );
+
+    const frontPoster = new THREE.Mesh(track(new THREE.PlaneGeometry(7.3, 4.9)), posterMat);
+    frontPoster.position.set(0, 7.6, 0.25);
+    const backPoster = new THREE.Mesh(track(new THREE.PlaneGeometry(7.3, 4.9)), posterMat);
+    backPoster.position.set(0, 7.6, -0.25);
+    backPoster.rotation.y = Math.PI;
+
+    // Top spotlight bar
+    const lightBar = new THREE.Mesh(track(new THREE.BoxGeometry(6.4, 0.16, 0.6)), lampBulbMat);
+    lightBar.position.set(0, 10.42, 0.35);
+
+    bg.add(legL, legR, frame, frontPoster, backPoster, lightBar);
+    root.add(bg);
+  });
+
+  // =========================================================================
   // 9. INSTANCED FOLIAGE (540 Stylized Multi-Tier Trees + Long Highway Lamps)
   // =========================================================================
   const treeCoords: [number, number, number][] = [];
@@ -1322,3 +1501,106 @@ export function buildCustomHomeMesh(
     },
   };
 }
+
+/**
+ * Dynamically builds a Player-Opened 3D Shop Stall (Kerala Tea Stall / Chaya Kada, Juice Bar, Bakery, Boutique, Tech).
+ */
+export function buildCustomShopMesh(
+  shop: CustomShopDef,
+): { group: THREE.Group; size: { x: number; y: number; z: number }; dispose: () => void } {
+  const disposables: { dispose: () => void }[] = [];
+  const track = <T extends { dispose: () => void }>(res: T): T => {
+    disposables.push(res);
+    return res;
+  };
+  const plan = CUSTOM_SHOP_PLANS.find((p) => p.shopType === shop.shopType) || CUSTOM_SHOP_PLANS[0];
+
+  const group = new THREE.Group();
+  group.position.set(shop.x, shop.y, shop.z);
+
+  const woodMat = track(new THREE.MeshStandardMaterial({ color: '#78350f', roughness: 0.85 }));
+  const counterTopMat = track(new THREE.MeshStandardMaterial({ color: '#f1f5f9', roughness: 0.4 }));
+  const awningMat = track(new THREE.MeshStandardMaterial({ color: shop.awningColor || plan.defaultAwning, roughness: 0.65 }));
+  const stripeMat = track(new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.7 }));
+  const brassMat = track(new THREE.MeshStandardMaterial({ color: '#f59e0b', roughness: 0.25, metalness: 0.82 }));
+  const lampMat = track(new THREE.MeshStandardMaterial({ color: '#fef08a', emissive: '#fbbf24', emissiveIntensity: 1.5 }));
+
+  // Wooden platform & counter base
+  const deck = new THREE.Mesh(track(new THREE.BoxGeometry(5.2, 0.22, 3.8)), woodMat);
+  deck.position.y = 0.11;
+  deck.receiveShadow = true;
+  const counter = new THREE.Mesh(track(new THREE.BoxGeometry(4.4, 1.15, 1.3)), woodMat);
+  counter.position.set(0, 0.78, 0.9);
+  counter.castShadow = true;
+  const topSlab = new THREE.Mesh(track(new THREE.BoxGeometry(4.6, 0.12, 1.5)), counterTopMat);
+  topSlab.position.set(0, 1.4, 0.9);
+  const backWall = new THREE.Mesh(track(new THREE.BoxGeometry(4.6, 3.0, 0.28)), woodMat);
+  backWall.position.set(0, 1.7, -1.5);
+  backWall.castShadow = true;
+  group.add(deck, counter, topSlab, backWall);
+
+  // Corner Support Posts
+  const postGeo = track(new THREE.CylinderGeometry(0.09, 0.1, 3.2, 8));
+  for (const [px, pz] of [[-2.2, 1.5], [2.2, 1.5], [-2.2, -1.5], [2.2, -1.5]]) {
+    const post = new THREE.Mesh(postGeo, woodMat);
+    post.position.set(px, 1.7, pz);
+    group.add(post);
+  }
+
+  // Striped Market Canopy Roof
+  const roof = new THREE.Mesh(track(new THREE.BoxGeometry(5.4, 0.25, 4.4)), awningMat);
+  roof.position.set(0, 3.35, 0.15);
+  roof.rotation.x = 0.08;
+  roof.castShadow = true;
+  group.add(roof);
+  for (let sx = -2.0; sx <= 2.0; sx += 1.0) {
+    const stripe = new THREE.Mesh(track(new THREE.BoxGeometry(0.42, 0.27, 4.44)), stripeMat);
+    stripe.position.set(sx, 3.36, 0.15);
+    stripe.rotation.x = 0.08;
+    group.add(stripe);
+  }
+
+  // Signature Props on Counter (Brass Tea Samovar + Snack Glass Jars for Chaya Kada!)
+  if (shop.shopType === 'tea_stall') {
+    const samovar = new THREE.Mesh(track(new THREE.CylinderGeometry(0.24, 0.28, 0.72, 14)), brassMat);
+    samovar.position.set(-1.3, 1.82, 0.9);
+    const samovarDome = new THREE.Mesh(track(new THREE.SphereGeometry(0.24, 12, 8)), brassMat);
+    samovarDome.position.set(-1.3, 2.2, 0.9);
+    const glassMat = track(new THREE.MeshStandardMaterial({ color: '#bae6fd', transparent: true, opacity: 0.7, roughness: 0.1 }));
+    const jar1 = new THREE.Mesh(track(new THREE.BoxGeometry(0.55, 0.48, 0.45)), glassMat);
+    jar1.position.set(0.4, 1.7, 0.9);
+    const jar2 = jar1.clone();
+    jar2.position.x = 1.25;
+    group.add(samovar, samovarDome, jar1, jar2);
+  } else {
+    const displayBox = new THREE.Mesh(track(new THREE.BoxGeometry(2.2, 0.55, 0.7)), counterTopMat);
+    displayBox.position.set(0, 1.72, 0.9);
+    group.add(displayBox);
+  }
+
+  // Warm Hanging Shop Bulb
+  const bulb = new THREE.Mesh(track(new THREE.SphereGeometry(0.18, 10, 10)), lampMat);
+  bulb.position.set(0, 3.05, 1.1);
+  group.add(bulb);
+
+  // Bright Shop Signboard
+  const ownerSub = shop.ownerInstagram
+    ? `${plan.label} · @${shop.ownerInstagram}`
+    : `${plan.label} · by ${shop.ownerName}`;
+  const signTex = track(createSignTexture(shop.name, ownerSub, shop.awningColor || plan.defaultAwning));
+  const signMesh = new THREE.Mesh(
+    track(new THREE.PlaneGeometry(4.6, 1.05)),
+    track(new THREE.MeshStandardMaterial({ map: signTex, roughness: 0.35 })),
+  );
+  signMesh.position.set(0, 3.98, 2.2);
+  group.add(signMesh);
+
+  return {
+    group,
+    size: { x: 5.2, y: 3.6, z: 3.8 },
+    dispose: () => {
+      disposables.forEach((dItem) => dItem.dispose());
+    },
+  };
+}
+
