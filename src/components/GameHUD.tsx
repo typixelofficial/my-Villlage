@@ -1,55 +1,39 @@
 import { useEffect, useState } from 'react';
 import {
+  AlertTriangle,
   BellRing,
   Briefcase,
-  Building2,
-  Car,
   ChevronDown,
   ChevronUp,
   Coins,
-  ExternalLink,
-  Gift,
+  Gamepad2,
   Heart,
   Home,
   Map as MapIcon,
   Menu,
   MessageSquare,
-  Mic,
-  MicOff,
   Navigation,
-  Package,
+  Phone,
+  PhoneIncoming,
   PhoneOff,
+  Search,
   ShieldCheck,
-  Smile,
-  Store,
-  Users,
-  Volume2,
+  Smartphone,
   X,
 } from 'lucide-react';
-import type { EmoteType } from '../shared/types.ts';
-import { MISSIONS, SHOWCASE_ADS } from '../shared/worldData.ts';
-import { getTodayDateKey } from '../lib/firebase.ts';
 import { useGameStore } from '../store/gameStore.ts';
 import type { MobileInputState } from './WorldViewport.tsx';
 import { Minimap } from './Minimap.tsx';
 import { GamePanels } from './GamePanels.tsx';
 import { WorldMapModal } from './WorldMapModal.tsx';
-import { PlayerAvatarDP } from './PlayerAvatarDP.tsx';
 import { playSfx } from '../game/audio.ts';
+import { multiplayer } from '../lib/multiplayer.ts';
 import { voiceChat } from '../lib/voiceChat.ts';
 
 interface GameHUDProps {
   mobileInputRef: React.MutableRefObject<MobileInputState>;
   onInteract: () => void;
 }
-
-const EMOTES: { id: EmoteType; label: string }[] = [
-  { id: 'wave', label: 'Wave' },
-  { id: 'dance', label: 'Dance' },
-  { id: 'cheer', label: 'Cheer' },
-  { id: 'clap', label: 'Clap' },
-  { id: 'sit', label: 'Sit' },
-];
 
 function formatCountdown(ms: number): string {
   const totalSec = Math.max(0, Math.floor(ms / 1000));
@@ -62,13 +46,13 @@ export function GameHUD({ mobileInputRef, onInteract }: GameHUDProps) {
   const profile = useGameStore((s) => s.profile);
   const isAdmin = useGameStore((s) => s.isAdmin);
   const health = useGameStore((s) => s.health);
+  const lowHealthAlertDismissed = useGameStore((s) => s.lowHealthAlertDismissed);
+  const setLowHealthAlertDismissed = useGameStore((s) => s.setLowHealthAlertDismissed);
   const activeVehicleId = useGameStore((s) => s.activeVehicleId);
   const vehicles = useGameStore((s) => s.vehicles);
   const localSpeedKmh = useGameStore((s) => s.localSpeedKmh);
   const localAltitude = useGameStore((s) => s.localAltitude);
   const localPos = useGameStore((s) => s.localPos);
-  const remotePlayers = useGameStore((s) => s.remotePlayers);
-  const activeMissionId = useGameStore((s) => s.activeMissionId);
   const activeWorkShift = useGameStore((s) => s.activeWorkShift);
   const setActiveWorkShift = useGameStore((s) => s.setActiveWorkShift);
   const waypointTarget = useGameStore((s) => s.waypointTarget);
@@ -76,59 +60,36 @@ export function GameHUD({ mobileInputRef, onInteract }: GameHUDProps) {
   const nearbyPrompt = useGameStore((s) => s.nearbyPrompt);
   const activePanel = useGameStore((s) => s.activePanel);
   const setActivePanel = useGameStore((s) => s.setActivePanel);
-  const openBuildingPanel = useGameStore((s) => s.openBuildingPanel);
   const setShowWorldMapModal = useGameStore((s) => s.setShowWorldMapModal);
   const mingleEvent = useGameStore((s) => s.mingleEvent);
-  const requestTeleport = useGameStore((s) => s.requestTeleport);
   const hudCollapsed = useGameStore((s) => s.hudCollapsed);
   const toggleHudCollapsed = useGameStore((s) => s.toggleHudCollapsed);
   const toasts = useGameStore((s) => s.toasts);
-  const triggerEmote = useGameStore((s) => s.triggerEmote);
   const showMobileControls = useGameStore((s) => s.showMobileControls);
-  const friendRequests = useGameStore((s) => s.friendRequests);
   const sessionReplacedMessage = useGameStore((s) => s.sessionReplacedMessage);
-  const chatMessages = useGameStore((s) => s.chatMessages);
   const unreadChatCount = useGameStore((s) => s.unreadChatCount);
+  const unreadUpdatesCount = useGameStore((s) => s.unreadUpdatesCount);
+  const phoneCall = useGameStore((s) => s.phoneCall);
   const voiceJoined = useGameStore((s) => s.voiceJoined);
-  const voiceMuted = useGameStore((s) => s.voiceMuted);
-  const voiceMode = useGameStore((s) => s.voiceMode);
-  const localSpeaking = useGameStore((s) => s.localSpeaking);
-  const voicePeers = useGameStore((s) => s.voicePeers);
+  const pushToast = useGameStore((s) => s.pushToast);
 
-  const [showEmotes, setShowEmotes] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
-  const [adIdx, setAdIdx] = useState(0);
 
   useEffect(() => {
     const t = window.setInterval(() => setNowMs(Date.now()), 1000);
     return () => window.clearInterval(t);
   }, []);
 
-  useEffect(() => {
-    const a = window.setInterval(() => {
-      setAdIdx((i) => (i + 1) % SHOWCASE_ADS.length);
-    }, 7000);
-    return () => window.clearInterval(a);
-  }, []);
-
   if (!profile) return null;
 
-  const activeMission = activeMissionId
-    ? MISSIONS.find((m) => m.id === activeMissionId)
-    : null;
   const activeVehicle = activeVehicleId ? vehicles[activeVehicleId] : null;
-  const dailyUnclaimed = profile.lastDailyLoginDate !== getTodayDateKey();
   const mingleRemainingMs = Math.max(0, mingleEvent.nextEventAtMs - nowMs);
   const showMingleBanner =
-    mingleEvent.alarmActive ||
-    mingleRemainingMs <= 5 * 60 * 1000 ||
-    Boolean(mingleEvent.activeMatch) ||
-    Boolean(mingleEvent.selectedPair);
-  const currentAd = SHOWCASE_ADS[adIdx % SHOWCASE_ADS.length];
+    mingleEvent.alarmActive || Boolean(mingleEvent.selectedPair);
+  const showLowHealthAlert = health < 50 && !lowHealthAlertDismissed;
 
   const togglePanel = (panel: NonNullable<typeof activePanel>) => {
     playSfx('click');
-    setShowEmotes(false);
     setActivePanel(activePanel === panel ? null : panel);
   };
 
@@ -143,11 +104,6 @@ export function GameHUD({ mobileInputRef, onInteract }: GameHUDProps) {
   const wpDist = waypointTarget
     ? Math.round(Math.hypot(localPos.x - waypointTarget.x, localPos.z - waypointTarget.z))
     : 0;
-
-  const recentChat = chatMessages.slice(-3);
-  const activeSpeakers = Object.values(voicePeers)
-    .filter((p) => p.speaking)
-    .map((p) => remotePlayers[p.uid]?.displayName || 'Player');
 
   return (
     <div className="fixed inset-0 z-20 pointer-events-none select-none">
@@ -168,113 +124,98 @@ export function GameHUD({ mobileInputRef, onInteract }: GameHUDProps) {
         </div>
       )}
 
-      {/* Top-Left Compact Player Profile, Daily Gift & Active Objective Strip */}
+      {/* Minimalist Top-Left Essentials Card (Name, Coins, Health + Low HP Hospital Alert) */}
       {!hudCollapsed && (
-        <div className="fixed top-4 left-4 flex flex-col gap-2 max-w-[305px] pointer-events-auto">
-          <div className="bg-[#0b1014]/88 border border-white/12 rounded-xl px-3.5 py-2.5 flex items-center gap-3">
-            {profile.photoURL ? (
-              <img
-                src={profile.photoURL}
-                alt={profile.displayName}
-                referrerPolicy="no-referrer"
-                className="w-10 h-10 rounded-full object-cover border border-white/20 shrink-0"
-              />
-            ) : (
-              <div className="w-10 h-10 rounded-full bg-emerald-700 flex items-center justify-center font-display font-bold text-white shrink-0">
-                {profile.displayName[0]}
-              </div>
-            )}
-            <div className="min-w-0 flex-1 space-y-0.5">
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-display text-sm font-bold text-white truncate">
-                  {profile.displayName}
-                </span>
-                <span className="text-[11px] font-mono-nums text-slate-400 shrink-0">
-                  {isAdmin ? <span className="text-amber-400 font-semibold mr-1.5">ADMIN</span> : null}
-                  Lv.{profile.level}
-                </span>
-              </div>
+        <div className="fixed top-4 left-4 flex flex-col gap-2 max-w-[270px] pointer-events-auto">
+          <div className="bg-[#0b1014]/86 border border-white/12 rounded-xl px-3.5 py-2.5 space-y-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-display text-sm font-bold text-white truncate">
+                {profile.displayName}
+              </span>
+              <span className="text-[11px] font-mono-nums text-slate-400 shrink-0">
+                {isAdmin ? <span className="text-amber-400 font-bold mr-1">ADMIN</span> : null}
+                Lv.{profile.level}
+              </span>
+            </div>
 
-              <div className="flex items-center justify-between gap-2 text-[11px]">
-                {profile.instagramId ? (
-                  <span className="text-sky-300/90 truncate">@{profile.instagramId}</span>
-                ) : (
-                  <span className="text-slate-400 capitalize">{profile.appearance.gender}</span>
-                )}
-                <span className="text-[10px] text-rose-300 capitalize shrink-0">
-                  {profile.relationshipStatus === 'married' && profile.partnerName
-                    ? `♥ ${profile.partnerName}`
-                    : `${profile.relationshipStatus} · ${profile.age}y`}
-                </span>
-              </div>
-
-              <div className="flex items-center justify-between gap-3 text-xs pt-0.5">
-                <button
-                  type="button"
-                  onClick={() => togglePanel('wallet')}
-                  className="inline-flex items-center gap-1 font-mono-nums font-bold text-emerald-400 hover:text-emerald-300 cursor-pointer"
-                >
-                  <Coins className="w-3.5 h-3.5" />
-                  {isAdmin ? 'FREE · ' : ''}
-                  {profile.greenCoins.toLocaleString()} GC
-                </button>
-                <div className="flex items-center gap-1.5 w-20">
-                  <Heart className="w-3 h-3 text-rose-400 shrink-0" />
-                  <div className="flex-1 h-1.5 bg-white/10 rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-emerald-500 transition-all"
-                      style={{ width: `${health}%` }}
-                    />
-                  </div>
+            <div className="flex items-center justify-between gap-3 text-xs">
+              <button
+                type="button"
+                onClick={() => togglePanel('wallet')}
+                className="inline-flex items-center gap-1 font-mono-nums font-bold text-emerald-400 hover:text-emerald-300 cursor-pointer"
+              >
+                <Coins className="w-3.5 h-3.5" />
+                {profile.greenCoins.toLocaleString()} GC
+              </button>
+              <div className="flex items-center gap-1.5 w-24">
+                <Heart
+                  className={`w-3.5 h-3.5 shrink-0 ${
+                    health < 50 ? 'text-rose-500 animate-pulse' : 'text-emerald-400'
+                  }`}
+                />
+                <div className="flex-1 h-1.5 bg-white/10 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full transition-all ${
+                      health < 50
+                        ? 'bg-rose-500'
+                        : health < 75
+                          ? 'bg-amber-400'
+                          : 'bg-emerald-500'
+                    }`}
+                    style={{ width: `${health}%` }}
+                  />
                 </div>
+                <span className="text-[10px] font-mono-nums text-slate-300">{health}%</span>
               </div>
             </div>
           </div>
 
-          {/* Daily Login Reward Quick Button */}
-          <button
-            type="button"
-            onClick={() => togglePanel('daily_reward')}
-            className={`rounded-xl px-3.5 py-2 flex items-center justify-between gap-2 text-left border transition-colors cursor-pointer ${
-              dailyUnclaimed
-                ? 'bg-amber-950/85 hover:bg-amber-900/85 border-amber-400/60 animate-pulse'
-                : 'bg-[#0b1014]/82 hover:bg-[#101820] border-white/10'
-            }`}
-          >
-            <div className="flex items-center gap-2 min-w-0">
-              <Gift className={`w-4 h-4 shrink-0 ${dailyUnclaimed ? 'text-amber-300' : 'text-emerald-400'}`} />
-              <div className="min-w-0">
-                <div className="text-xs font-bold text-white truncate">
-                  {dailyUnclaimed ? 'Claim Daily Login Reward!' : `Daily Streak: Day ${profile.dailyLoginStreak || 1}`}
+          {/* Urgent <50% Health Hospital Alert */}
+          {showLowHealthAlert && (
+            <div className="bg-rose-950/92 border border-rose-400/70 rounded-xl px-3 py-2.5 space-y-2 shadow-lg">
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex items-center gap-1.5 text-xs font-bold text-rose-200">
+                  <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 animate-pulse" />
+                  <span>Low Health ({health}%)!</span>
                 </div>
-                <div className="text-[10px] text-slate-300 truncate">
-                  {dailyUnclaimed ? 'Free Green Coins + XP ready now' : 'Come back tomorrow for next bonus'}
-                </div>
+                <button
+                  type="button"
+                  onClick={() => setLowHealthAlertDismissed(true)}
+                  aria-label="Dismiss health alert"
+                  className="text-rose-300 hover:text-white cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
               </div>
+              <p className="text-[11px] text-rose-100/90 leading-snug">
+                Visit Green Valley Hospital or grab hot chai to recover HP.
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  setWaypointTarget({ x: 16, z: -86, label: 'Green Valley Central Hospital' });
+                  pushToast('Hospital Waypoint Set', 'Follow the sky beacon to Central Hospital!', 'rose');
+                }}
+                className="w-full py-1.5 bg-rose-600 hover:bg-rose-500 text-white text-[11px] font-bold rounded-lg cursor-pointer"
+              >
+                Navigate to Hospital
+              </button>
             </div>
-            {dailyUnclaimed && (
-              <span className="px-2 py-0.5 bg-amber-500 text-slate-950 text-[10px] font-extrabold rounded shrink-0">
-                CLAIM
-              </span>
-            )}
-          </button>
+          )}
 
+          {/* Active Work Shift Pill (Only when on a shift) */}
           {activeWorkShift && (
-            <div className="bg-[#0b1014]/88 border border-emerald-500/35 rounded-xl px-3.5 py-2 flex items-start justify-between gap-2">
+            <div className="bg-[#0b1014]/88 border border-emerald-500/35 rounded-xl px-3 py-2 flex items-center justify-between gap-2">
               <button
                 type="button"
                 onClick={() => togglePanel('works')}
                 className="text-left min-w-0 flex-1 cursor-pointer"
               >
-                <div className="flex items-center justify-between gap-2 text-[11px] text-emerald-400 font-medium">
-                  <span>Active Work Shift</span>
-                  <span className="font-mono-nums">+{activeWorkShift.payout} GC</span>
+                <div className="text-[11px] font-semibold text-emerald-400 truncate">
+                  {activeWorkShift.title} (+{activeWorkShift.payout} GC)
                 </div>
-                <div className="text-xs font-semibold text-white truncate mt-0.5">
-                  {activeWorkShift.title}
-                </div>
-                <div className="text-[11px] text-slate-300 truncate font-mono-nums">
-                  {activeWorkShift.targetName} · {workDist}m away
+                <div className="text-[10px] text-slate-300 font-mono-nums truncate">
+                  {activeWorkShift.targetName} · {workDist}m
                 </div>
               </button>
               <button
@@ -288,17 +229,16 @@ export function GameHUD({ mobileInputRef, onInteract }: GameHUDProps) {
             </div>
           )}
 
+          {/* Active Compass Waypoint Pill */}
           {waypointTarget && !activeWorkShift && (
-            <div className="bg-[#0b1014]/88 border border-sky-500/35 rounded-xl px-3.5 py-2 flex items-center justify-between gap-2">
+            <div className="bg-[#0b1014]/88 border border-sky-500/35 rounded-xl px-3 py-2 flex items-center justify-between gap-2">
               <div className="flex items-center gap-2 min-w-0">
                 <Navigation className="w-3.5 h-3.5 text-sky-400 shrink-0" />
                 <div className="min-w-0">
-                  <div className="text-[11px] text-sky-300 font-medium truncate">
-                    Walk to {waypointTarget.label}
+                  <div className="text-[11px] text-sky-300 font-semibold truncate">
+                    {waypointTarget.label}
                   </div>
-                  <div className="text-[11px] text-slate-400 font-mono-nums">
-                    {wpDist}m away · Follow beacon
-                  </div>
+                  <div className="text-[10px] text-slate-400 font-mono-nums">{wpDist}m away</div>
                 </div>
               </div>
               <button
@@ -311,129 +251,83 @@ export function GameHUD({ mobileInputRef, onInteract }: GameHUDProps) {
               </button>
             </div>
           )}
-
-          {activeMission && !activeWorkShift && !waypointTarget && (
-            <button
-              type="button"
-              onClick={() => togglePanel('missions')}
-              className="bg-[#0b1014]/84 hover:bg-[#101820] border border-amber-500/25 rounded-xl px-3.5 py-2 text-left transition-colors cursor-pointer"
-            >
-              <div className="flex items-center justify-between gap-2 text-[11px] text-amber-400 font-medium">
-                <span>Active Mission</span>
-                <span className="font-mono-nums">+{activeMission.rewardCoins} GC</span>
-              </div>
-              <div className="text-xs font-semibold text-white truncate mt-0.5">
-                {activeMission.title}
-              </div>
-              <div className="text-[11px] text-slate-400 truncate">
-                {activeMission.objectiveText}
-              </div>
-            </button>
-          )}
         </div>
       )}
 
-      {/* Top-Center Single-to-Mingle 5-Min Alarm & Selected Members DP Banner */}
-      {!hudCollapsed && showMingleBanner && (
-        <div className="fixed top-4 left-1/2 -translate-x-1/2 pointer-events-auto max-w-[460px] w-[92vw]">
-          <div className="bg-[#180c14]/92 border border-rose-400/50 rounded-xl px-4 py-2.5 flex items-center justify-between gap-3">
+      {/* Incoming Private Smartphone Call Toast */}
+      {phoneCall && phoneCall.status === 'ringing_in' && activePanel !== 'phone' && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-30 pointer-events-auto max-w-[360px] w-[92vw]">
+          <div className="bg-[#0c1b16]/95 border border-emerald-400/60 rounded-2xl px-4 py-3 flex items-center justify-between gap-3 shadow-2xl">
             <div className="flex items-center gap-2.5 min-w-0">
-              {mingleEvent.selectedPair ? (
-                <div className="flex items-center -space-x-1.5 shrink-0">
-                  <PlayerAvatarDP
-                    displayName={mingleEvent.selectedPair.memberA.displayName}
-                    photoURL={mingleEvent.selectedPair.memberA.photoURL}
-                    appearance={mingleEvent.selectedPair.memberA.appearance}
-                    gender={mingleEvent.selectedPair.memberA.gender}
-                    size="xs"
-                    ringClassName="ring-2 ring-rose-400"
-                  />
-                  <PlayerAvatarDP
-                    displayName={mingleEvent.selectedPair.memberB.displayName}
-                    photoURL={mingleEvent.selectedPair.memberB.photoURL}
-                    appearance={mingleEvent.selectedPair.memberB.appearance}
-                    gender={mingleEvent.selectedPair.memberB.gender}
-                    size="xs"
-                    ringClassName="ring-2 ring-pink-400"
-                  />
-                </div>
-              ) : (
-                <BellRing className="w-4 h-4 text-rose-400 shrink-0 animate-bounce" />
-              )}
+              <PhoneIncoming className="w-5 h-5 text-emerald-400 animate-bounce shrink-0" />
               <div className="min-w-0">
-                <div className="text-xs font-bold text-white truncate">
-                  {mingleEvent.selectedPair
-                    ? mingleEvent.selectedPair.status === 'honeymoon'
-                      ? `Free Honeymoon: ${mingleEvent.selectedPair.memberA.displayName} ♥ ${mingleEvent.selectedPair.memberB.displayName}`
-                      : mingleEvent.selectedPair.status === 'married'
-                        ? `Just Married: ${mingleEvent.selectedPair.memberA.displayName} ♥ ${mingleEvent.selectedPair.memberB.displayName}`
-                        : `Selected: ${mingleEvent.selectedPair.memberA.displayName} ♥ ${mingleEvent.selectedPair.memberB.displayName}`
-                    : mingleEvent.activeMatch
-                      ? `Match: ${mingleEvent.activeMatch.partnerName}`
-                      : `Free Single-to-Mingle in ${formatCountdown(mingleRemainingMs)}`}
-                </div>
-                <div className="text-[10px] text-rose-200/90 truncate">
-                  FREE · {mingleEvent.locationName}
-                </div>
+                <div className="text-xs font-bold text-white truncate">{phoneCall.peerName}</div>
+                <div className="text-[10px] text-emerald-300">Incoming Private Phone Call</div>
               </div>
             </div>
             <div className="flex items-center gap-1.5 shrink-0">
               <button
                 type="button"
                 onClick={() => {
-                  setActivePanel('mingle');
+                  multiplayer.acceptCall(phoneCall.callId);
+                  if (!voiceJoined) void voiceChat.joinVoice();
+                  setActivePanel('phone');
                 }}
-                className="px-2.5 py-1.5 bg-rose-600 hover:bg-rose-500 text-white text-[11px] font-semibold rounded-lg cursor-pointer whitespace-nowrap"
+                className="p-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl cursor-pointer"
+                aria-label="Accept call"
               >
-                {mingleEvent.selectedPair ? 'View DPs' : 'Open'}
+                <Phone className="w-4 h-4" />
+              </button>
+              <button
+                type="button"
+                onClick={() => multiplayer.declineCall(phoneCall.callId)}
+                className="p-2 bg-rose-600 hover:bg-rose-500 text-white rounded-xl cursor-pointer"
+                aria-label="Decline call"
+              >
+                <PhoneOff className="w-4 h-4" />
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Top-Right Live Radar Minimap + Compact Rotating Typixel Showcase Ad Card */}
-      {!hudCollapsed && (
-        <div className="fixed top-4 right-4 flex flex-col gap-2 items-end pointer-events-auto">
-          <Minimap />
-
-          {/* Compact Typixel Official Showcase Ad Card */}
-          <a
-            href={currentAd.instagramUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="w-[168px] bg-[#0b1014]/88 hover:bg-[#111b23] border border-white/12 hover:border-amber-400/45 rounded-xl overflow-hidden transition-colors block"
-          >
-            <div className="relative h-20 w-full bg-slate-900 overflow-hidden">
-              <img
-                src={currentAd.imageUrl}
-                alt={currentAd.title}
-                className="w-full h-full object-cover"
-              />
-              <span className="absolute top-1 left-1 px-1.5 py-0.5 bg-black/75 text-[9px] font-bold text-amber-300 rounded">
-                AD · TYPIXEL
-              </span>
-            </div>
-            <div className="px-2.5 py-1.5">
-              <div className="text-[11px] font-bold text-white truncate">{currentAd.title}</div>
-              <div className="flex items-center justify-between text-[9px] text-sky-300 mt-0.5">
-                <span className="truncate">@typixelofficial</span>
-                <ExternalLink className="w-2.5 h-2.5 shrink-0" />
+      {/* Compact Mingle Live Alarm Banner (Only when active) */}
+      {!hudCollapsed && showMingleBanner && phoneCall?.status !== 'ringing_in' && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 pointer-events-auto max-w-[400px] w-[90vw]">
+          <div className="bg-[#180c14]/90 border border-rose-400/50 rounded-xl px-3.5 py-2 flex items-center justify-between gap-2.5">
+            <div className="flex items-center gap-2 min-w-0">
+              <BellRing className="w-4 h-4 text-rose-400 shrink-0" />
+              <div className="text-xs font-bold text-white truncate">
+                {mingleEvent.selectedPair
+                  ? `${mingleEvent.selectedPair.memberA.displayName} ♥ ${mingleEvent.selectedPair.memberB.displayName}`
+                  : `Mingle Round: ${formatCountdown(mingleRemainingMs)}`}
               </div>
             </div>
-          </a>
+            <button
+              type="button"
+              onClick={() => setActivePanel('mingle')}
+              className="px-2.5 py-1 bg-rose-600 hover:bg-rose-500 text-white text-[11px] font-bold rounded-lg cursor-pointer shrink-0"
+            >
+              Open
+            </button>
+          </div>
         </div>
       )}
 
-      {/* Top-Center Toast Notifications */}
+      {/* Top-Right Compact Minimap Only */}
+      {!hudCollapsed && (
+        <div className="fixed top-4 right-4 pointer-events-auto">
+          <Minimap />
+        </div>
+      )}
+
+      {/* Toast Notifications */}
       {toasts.length > 0 && (
-        <div
-          className={`fixed ${showMingleBanner ? 'top-20' : 'top-4'} left-1/2 -translate-x-1/2 flex flex-col gap-2 w-[340px] max-w-[90vw] pointer-events-none`}
-        >
+        <div className="fixed top-20 left-1/2 -translate-x-1/2 flex flex-col gap-1.5 w-[320px] max-w-[90vw] pointer-events-none">
           {toasts.map((t) => (
             <div
               key={t.id}
-              className="bg-[#0b1014]/94 border border-white/15 rounded-lg px-4 py-2.5 text-center"
+              className="bg-[#0b1014]/94 border border-white/15 rounded-lg px-3.5 py-2 text-center"
             >
               <div
                 className={`text-xs font-semibold ${
@@ -454,86 +348,9 @@ export function GameHUD({ mobileInputRef, onInteract }: GameHUDProps) {
         </div>
       )}
 
-      {/* Bottom-Left Compact Voice Bar + Live Online Chat Ticker (when Chat panel is closed) */}
-      {!hudCollapsed && activePanel !== 'chat' && !showMobileControls && (
-        <div className="fixed bottom-24 left-4 flex flex-col gap-2 w-[310px] max-w-[calc(100vw-2rem)] pointer-events-auto">
-          {voiceJoined && (
-            <div className="bg-[#0b1014]/90 border border-emerald-500/40 rounded-xl px-3 py-2 flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2 min-w-0">
-                <Volume2
-                  className={`w-4 h-4 shrink-0 ${
-                    localSpeaking || activeSpeakers.length > 0
-                      ? 'text-emerald-400'
-                      : 'text-slate-400'
-                  }`}
-                />
-                <div className="min-w-0">
-                  <div className="text-[11px] font-semibold text-white truncate">
-                    {localSpeaking
-                      ? 'You are speaking...'
-                      : activeSpeakers.length > 0
-                        ? `Talking: ${activeSpeakers.join(', ')}`
-                        : `Voice Live (${Object.keys(voicePeers).length + 1} in voice)`}
-                  </div>
-                  <div className="text-[10px] text-slate-400">
-                    {voiceMode === 'global' ? 'Global Voice' : 'Nearby Voice (45m)'} ·{' '}
-                    {voiceMuted ? 'Mic Muted (V)' : 'Mic On (V)'}
-                  </div>
-                </div>
-              </div>
-              <div className="flex items-center gap-1 shrink-0">
-                <button
-                  type="button"
-                  onClick={() => voiceChat.toggleMute()}
-                  aria-label={voiceMuted ? 'Unmute microphone' : 'Mute microphone'}
-                  className={`p-1.5 rounded-lg cursor-pointer ${
-                    voiceMuted
-                      ? 'bg-amber-600/30 text-amber-300 hover:bg-amber-600/45'
-                      : 'bg-emerald-600/30 text-emerald-300 hover:bg-emerald-600/45'
-                  }`}
-                >
-                  {voiceMuted ? <MicOff className="w-3.5 h-3.5" /> : <Mic className="w-3.5 h-3.5" />}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => voiceChat.leaveVoice()}
-                  aria-label="Leave voice chat"
-                  className="p-1.5 rounded-lg bg-rose-950/70 hover:bg-rose-900 text-rose-300 cursor-pointer"
-                >
-                  <PhoneOff className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            </div>
-          )}
-
-          {recentChat.length > 0 && (
-            <button
-              type="button"
-              onClick={() => togglePanel('chat')}
-              className="bg-[#0b1014]/78 hover:bg-[#0e151b]/92 border border-white/10 rounded-xl px-3 py-2 text-left space-y-1 transition-colors cursor-pointer"
-            >
-              {recentChat.map((m) => (
-                <div key={m.id} className="text-[11px] leading-snug truncate">
-                  {m.channel === 'system' ? (
-                    <span className="text-emerald-400/90 italic">{m.text}</span>
-                  ) : (
-                    <>
-                      <span className="font-semibold text-white mr-1">
-                        {m.channel === 'direct' ? `[DM] ${m.displayName}` : m.displayName}:
-                      </span>
-                      <span className="text-slate-300">{m.text}</span>
-                    </>
-                  )}
-                </div>
-              ))}
-            </button>
-          )}
-        </div>
-      )}
-
-      {/* Proximity Interaction Prompt (Clickable + Keyboard [E]) */}
+      {/* Centered Proximity Interaction Prompt */}
       {nearbyPrompt && !activeVehicle && !activePanel && (
-        <div className="fixed bottom-28 left-1/2 -translate-x-1/2 pointer-events-auto">
+        <div className="fixed bottom-24 left-1/2 -translate-x-1/2 pointer-events-auto">
           <button
             type="button"
             onClick={onInteract}
@@ -556,9 +373,9 @@ export function GameHUD({ mobileInputRef, onInteract }: GameHUDProps) {
         </div>
       )}
 
-      {/* Vehicle Speedometer (Only When Driving / Flying) */}
+      {/* Compact Vehicle Speedometer (Only While Driving) */}
       {activeVehicle && (
-        <div className="fixed bottom-24 right-5 bg-[#0b1014]/90 border border-white/15 rounded-xl px-4 py-3 min-w-[170px] pointer-events-auto">
+        <div className="fixed bottom-24 right-5 bg-[#0b1014]/90 border border-white/15 rounded-xl px-4 py-3 min-w-[165px] pointer-events-auto">
           <div className="text-[11px] text-slate-400 truncate">{activeVehicle.name}</div>
           <div className="flex items-baseline gap-1.5 mt-0.5">
             <span className="font-display text-3xl font-extrabold font-mono-nums text-white">
@@ -568,7 +385,7 @@ export function GameHUD({ mobileInputRef, onInteract }: GameHUDProps) {
           </div>
           {activeVehicle.canFly && (
             <div className="text-[11px] font-mono-nums text-sky-300 mt-0.5">
-              ALT {localAltitude}m · SPACE Up / SHIFT Down
+              ALT {localAltitude}m
             </div>
           )}
           <button
@@ -576,7 +393,7 @@ export function GameHUD({ mobileInputRef, onInteract }: GameHUDProps) {
             onClick={onInteract}
             className="mt-2 w-full py-1.5 bg-white/8 hover:bg-white/14 text-xs font-medium text-slate-200 rounded-md cursor-pointer"
           >
-            Press E to Exit Vehicle
+            Exit Vehicle (E)
           </button>
         </div>
       )}
@@ -651,74 +468,45 @@ export function GameHUD({ mobileInputRef, onInteract }: GameHUDProps) {
         </>
       )}
 
-      {/* Emote Quick Picker Popover */}
-      {showEmotes && !hudCollapsed && (
-        <div className="fixed bottom-20 left-1/2 -translate-x-1/2 bg-[#0b1014]/94 border border-white/15 rounded-xl p-2 flex items-center gap-1.5 pointer-events-auto">
-          {EMOTES.map((em) => (
-            <button
-              key={em.id}
-              type="button"
-              onClick={() => {
-                triggerEmote(em.id);
-                setShowEmotes(false);
-                playSfx('click');
-              }}
-              className="px-3 py-1.5 text-xs font-medium text-slate-200 hover:text-white bg-white/5 hover:bg-emerald-600 rounded-lg transition-colors cursor-pointer whitespace-nowrap"
-            >
-              {em.label}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {/* Unified Collapsible Bottom Control Dock (Clean Normal-User Controls; Admin Hidden Unless Verified Admin) */}
+      {/* Clean Minimalist Bottom Dock — Essential Controls Only */}
       <div className="fixed bottom-4 left-1/2 -translate-x-1/2 flex flex-col items-center gap-1.5 max-w-[96vw] pointer-events-auto">
         <button
           type="button"
           onClick={toggleHudCollapsed}
-          className="inline-flex items-center gap-1.5 px-3 py-1 bg-[#0b1014]/85 hover:bg-[#121c24] border border-white/12 rounded-md text-[11px] font-medium text-slate-300 hover:text-white transition-colors cursor-pointer"
+          className="inline-flex items-center gap-1 px-2.5 py-0.5 bg-[#0b1014]/80 hover:bg-[#121c24] border border-white/12 rounded-md text-[10px] font-medium text-slate-300 hover:text-white cursor-pointer"
         >
           {hudCollapsed ? (
             <>
-              <ChevronUp className="w-3.5 h-3.5" />
-              Show HUD (H)
+              <ChevronUp className="w-3 h-3" />
+              HUD
             </>
           ) : (
             <>
-              <ChevronDown className="w-3.5 h-3.5" />
-              Hide HUD (H)
+              <ChevronDown className="w-3 h-3" />
+              Hide
             </>
           )}
         </button>
 
         {!hudCollapsed && (
           <nav
-            aria-label="Game Actions"
+            aria-label="Essential Controls"
             className="bg-[#0b1014]/90 border border-white/12 rounded-xl px-2 py-1.5 flex items-center gap-1 overflow-x-auto max-w-[95vw]"
           >
             <DockButton
-              icon={<MessageSquare className="w-4 h-4" />}
-              label={unreadChatCount > 0 ? `Chat (${unreadChatCount})` : 'Chat'}
-              active={activePanel === 'chat'}
-              onClick={() => togglePanel('chat')}
-            />
-            <DockButton
-              icon={
-                voiceJoined && voiceMuted ? (
-                  <MicOff className="w-4 h-4 text-amber-300" />
-                ) : (
-                  <Mic className={`w-4 h-4 ${voiceJoined ? 'text-white' : 'text-emerald-400'}`} />
-                )
+              icon={<Smartphone className="w-4 h-4 text-emerald-400" />}
+              label={
+                phoneCall
+                  ? 'In Call'
+                  : unreadUpdatesCount > 0
+                    ? `Phone (${unreadUpdatesCount})`
+                    : 'Phone'
               }
-              label={!voiceJoined ? 'Talk' : voiceMuted ? 'Muted' : 'Mic On'}
-              active={voiceJoined && !voiceMuted}
-              onClick={() => {
-                playSfx('click');
-                voiceChat.toggleMute();
-              }}
+              active={activePanel === 'phone' || Boolean(phoneCall)}
+              onClick={() => togglePanel('phone')}
             />
             <DockButton
-              icon={<MapIcon className="w-4 h-4 text-emerald-400" />}
+              icon={<MapIcon className="w-4 h-4 text-sky-400" />}
               label="Map"
               active={false}
               onClick={() => {
@@ -727,68 +515,34 @@ export function GameHUD({ mobileInputRef, onInteract }: GameHUDProps) {
               }}
             />
             <DockButton
-              icon={<Briefcase className="w-4 h-4" />}
+              icon={<Search className="w-4 h-4 text-sky-300" />}
+              label="Search"
+              active={activePanel === 'search'}
+              onClick={() => togglePanel('search')}
+            />
+            <DockButton
+              icon={<Briefcase className="w-4 h-4 text-amber-300" />}
               label="Works"
               active={activePanel === 'works'}
               onClick={() => togglePanel('works')}
             />
             <DockButton
-              icon={<Home className="w-4 h-4" />}
-              label="Homes"
-              active={activePanel === 'properties'}
+              icon={<Home className="w-4 h-4 text-emerald-300" />}
+              label="Build"
+              active={activePanel === 'properties' || activePanel === 'shops'}
               onClick={() => togglePanel('properties')}
             />
             <DockButton
-              icon={<Store className="w-4 h-4 text-rose-400" />}
-              label="Tea & Shops"
-              active={activePanel === 'shops'}
-              onClick={() => togglePanel('shops')}
+              icon={<Gamepad2 className="w-4 h-4 text-purple-400" />}
+              label="Games"
+              active={activePanel === 'game_center'}
+              onClick={() => togglePanel('game_center')}
             />
             <DockButton
-              icon={<Building2 className="w-4 h-4 text-sky-400" />}
-              label="Buildings"
-              active={activePanel === 'building'}
-              onClick={() => {
-                playSfx('click');
-                if (activePanel === 'building') {
-                  setActivePanel(null);
-                } else {
-                  openBuildingPanel('bldg-hospital');
-                }
-              }}
-            />
-            <DockButton
-              icon={<Car className="w-4 h-4" />}
-              label="KSRTC & Cars"
-              active={activePanel === 'vehicles'}
-              onClick={() => togglePanel('vehicles')}
-            />
-            <DockButton
-              icon={<Heart className="w-4 h-4 text-rose-400" />}
-              label="Mingle"
-              active={activePanel === 'mingle'}
-              onClick={() => togglePanel('mingle')}
-            />
-            <DockButton
-              icon={<Package className="w-4 h-4" />}
-              label="Bag"
-              active={activePanel === 'inventory'}
-              onClick={() => togglePanel('inventory')}
-            />
-            <DockButton
-              icon={<Users className="w-4 h-4" />}
-              label={friendRequests.length > 0 ? `Friends (${friendRequests.length})` : 'Friends'}
-              active={activePanel === 'friends'}
-              onClick={() => togglePanel('friends')}
-            />
-            <DockButton
-              icon={<Smile className="w-4 h-4" />}
-              label="Emotes"
-              active={showEmotes}
-              onClick={() => {
-                playSfx('click');
-                setShowEmotes((v) => !v);
-              }}
+              icon={<MessageSquare className="w-4 h-4 text-slate-200" />}
+              label={unreadChatCount > 0 ? `Chat (${unreadChatCount})` : 'Chat'}
+              active={activePanel === 'chat'}
+              onClick={() => togglePanel('chat')}
             />
             {isAdmin && (
               <DockButton
@@ -799,7 +553,7 @@ export function GameHUD({ mobileInputRef, onInteract }: GameHUDProps) {
               />
             )}
             <DockButton
-              icon={<Menu className="w-4 h-4" />}
+              icon={<Menu className="w-4 h-4 text-slate-200" />}
               label="Menu"
               active={activePanel === 'pause'}
               onClick={() => togglePanel('pause')}

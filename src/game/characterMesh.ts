@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { AnimationState, CharacterAppearance } from '../shared/types.ts';
+import type { AnimationState, CharacterAppearance, HeldItemType } from '../shared/types.ts';
 import { createContactShadowTexture } from './textures.ts';
 
 let sharedShadowTex: THREE.CanvasTexture | null = null;
@@ -12,10 +12,15 @@ export interface CharacterRig {
   rightArm: THREE.Group;
   leftLeg: THREE.Group;
   rightLeg: THREE.Group;
+  heldItemGroup: THREE.Group;
+  currentHeldItem: HeldItemType;
   dispose: () => void;
 }
 
-export function buildCharacterRig(appearance: CharacterAppearance): CharacterRig {
+export function buildCharacterRig(
+  appearance: CharacterAppearance,
+  muscleLevel = 0,
+): CharacterRig {
   const root = new THREE.Group();
   const bodyGroup = new THREE.Group();
   root.add(bodyGroup);
@@ -26,11 +31,12 @@ export function buildCharacterRig(appearance: CharacterAppearance): CharacterRig
   const isLehenga = appearance.shirtStyle === 'lehenga';
   const isMundu = appearance.shirtStyle === 'mundu';
   const hasSkirt = isDress || isLehenga;
+  const muscleBoost = Math.max(0, Math.min(10, muscleLevel)) * 0.018;
 
-  // Distinct anatomical proportions for Male vs. Female characters
-  const shoulderWidth = isFemale ? 0.38 : 0.56;
-  const torsoWidth = isFemale ? 0.33 : 0.46;
-  const waistWidth = isFemale ? 0.25 : 0.41;
+  // Distinct anatomical proportions for Male vs. Female characters + Gym Muscle Growth
+  const shoulderWidth = (isFemale ? 0.38 : 0.56) + muscleBoost * 1.4;
+  const torsoWidth = (isFemale ? 0.33 : 0.46) + muscleBoost * 1.25;
+  const waistWidth = (isFemale ? 0.25 : 0.41) + muscleBoost * 0.4;
   const hipWidth = isFemale ? 0.145 : 0.14;
 
   const skinMat = new THREE.MeshStandardMaterial({
@@ -496,8 +502,8 @@ export function buildCharacterRig(appearance: CharacterAppearance): CharacterRig
     bodyGroup.add(pack, flap);
   }
 
-  // Arms (Slender for female, broader for male)
-  const armThick = isFemale ? 0.105 : 0.14;
+  // Arms (Slender for female, broader for male + gym muscle boost)
+  const armThick = (isFemale ? 0.105 : 0.14) + muscleBoost * 0.45;
   const buildArm = (side: -1 | 1): THREE.Group => {
     const arm = new THREE.Group();
     arm.position.set(side * (shoulderWidth * 0.5 + 0.05), 1.44, 0);
@@ -537,6 +543,11 @@ export function buildCharacterRig(appearance: CharacterAppearance): CharacterRig
 
   const leftArm = buildArm(-1);
   const rightArm = buildArm(1);
+
+  // Held Item Mount in Right Hand (Tea, Latte, Juice, Snack, Football, Volleyball, Cricket Bat)
+  const heldItemGroup = new THREE.Group();
+  heldItemGroup.position.set(0, -0.58, 0.09);
+  rightArm.add(heldItemGroup);
 
   // Legs (Show skin lower legs under dresses, slim legs for female, straight trousers for male)
   const legW = isFemale ? 0.125 : 0.16;
@@ -579,7 +590,111 @@ export function buildCharacterRig(appearance: CharacterAppearance): CharacterRig
     });
   };
 
-  return { root, bodyGroup, headGroup, leftArm, rightArm, leftLeg, rightLeg, dispose };
+  return {
+    root,
+    bodyGroup,
+    headGroup,
+    leftArm,
+    rightArm,
+    leftLeg,
+    rightLeg,
+    heldItemGroup,
+    currentHeldItem: 'none',
+    dispose,
+  };
+}
+
+function clearHeldItemGroup(group: THREE.Group): void {
+  while (group.children.length > 0) {
+    const child = group.children[0];
+    group.remove(child);
+    child.traverse((obj) => {
+      if ((obj as THREE.Mesh).isMesh) {
+        const mesh = obj as THREE.Mesh;
+        mesh.geometry.dispose();
+        const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+        mats.forEach((m) => m.dispose());
+      }
+    });
+  }
+}
+
+export function setCharacterHeldItem(rig: CharacterRig, item: HeldItemType): void {
+  if (rig.currentHeldItem === item) return;
+  rig.currentHeldItem = item;
+  clearHeldItemGroup(rig.heldItemGroup);
+  if (item === 'none') return;
+
+  if (item === 'tea' || item === 'latte') {
+    // Kerala Chaya Glass / Brass Tumbler with hot liquid & visible rising steam puff
+    const cupMat = new THREE.MeshStandardMaterial({
+      color: item === 'tea' ? '#e2e8f0' : '#f8fafc',
+      roughness: 0.25,
+      metalness: item === 'tea' ? 0.35 : 0.1,
+    });
+    const liquidMat = new THREE.MeshStandardMaterial({
+      color: item === 'tea' ? '#b45309' : '#65a30d',
+      roughness: 0.2,
+    });
+    const cup = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.044, 0.15, 12), cupMat);
+    const liquid = new THREE.Mesh(new THREE.CylinderGeometry(0.049, 0.046, 0.03, 12), liquidMat);
+    liquid.position.y = 0.064;
+    const steamMat = new THREE.MeshBasicMaterial({
+      color: '#ffffff',
+      transparent: true,
+      opacity: 0.55,
+    });
+    const steam = new THREE.Mesh(new THREE.SphereGeometry(0.035, 8, 8), steamMat);
+    steam.position.y = 0.13;
+    rig.heldItemGroup.add(cup, liquid, steam);
+  } else if (item === 'juice') {
+    const glassMat = new THREE.MeshStandardMaterial({
+      color: '#f97316',
+      roughness: 0.22,
+      transparent: true,
+      opacity: 0.9,
+    });
+    const cup = new THREE.Mesh(new THREE.CylinderGeometry(0.056, 0.042, 0.17, 12), glassMat);
+    const straw = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.008, 0.008, 0.22, 6),
+      new THREE.MeshStandardMaterial({ color: '#ec4899' }),
+    );
+    straw.position.set(0.02, 0.08, 0);
+    straw.rotation.z = -0.25;
+    rig.heldItemGroup.add(cup, straw);
+  } else if (item === 'snack') {
+    const plate = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.11, 0.09, 0.02, 14),
+      new THREE.MeshStandardMaterial({ color: '#f8fafc', roughness: 0.4 }),
+    );
+    const pazham = new THREE.Mesh(
+      new THREE.BoxGeometry(0.12, 0.05, 0.07),
+      new THREE.MeshStandardMaterial({ color: '#d97706', roughness: 0.72 }),
+    );
+    pazham.position.y = 0.035;
+    rig.heldItemGroup.add(plate, pazham);
+  } else if (item === 'football' || item === 'volleyball') {
+    const ball = new THREE.Mesh(
+      new THREE.SphereGeometry(0.14, 14, 12),
+      new THREE.MeshStandardMaterial({
+        color: item === 'football' ? '#f8fafc' : '#fde047',
+        roughness: 0.45,
+      }),
+    );
+    ball.position.set(0, -0.02, 0.08);
+    rig.heldItemGroup.add(ball);
+  } else if (item === 'cricket_bat') {
+    const handle = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.018, 0.02, 0.22, 8),
+      new THREE.MeshStandardMaterial({ color: '#1e293b', roughness: 0.8 }),
+    );
+    const blade = new THREE.Mesh(
+      new THREE.BoxGeometry(0.09, 0.56, 0.035),
+      new THREE.MeshStandardMaterial({ color: '#d6b37d', roughness: 0.72 }),
+    );
+    blade.position.y = -0.35;
+    rig.heldItemGroup.add(handle, blade);
+  }
 }
 
 export function animateCharacterRig(
@@ -603,14 +718,14 @@ export function animateCharacterRig(
     targetL = swing * 0.55;
     targetR = -swing * 0.55;
     targetLA = -swing * 0.45;
-    targetRA = swing * 0.45;
+    targetRA = rig.currentHeldItem !== 'none' ? -0.95 : swing * 0.45;
     targetBodyY = Math.abs(Math.cos(elapsed * 8.5)) * 0.05;
   } else if (anim === 'run') {
     const swing = Math.sin(elapsed * 13.5);
     targetL = swing * 0.92;
     targetR = -swing * 0.92;
     targetLA = -swing * 0.85;
-    targetRA = swing * 0.85;
+    targetRA = rig.currentHeldItem !== 'none' ? -1.05 : swing * 0.85;
     targetBodyY = Math.abs(Math.cos(elapsed * 13.5)) * 0.1;
   } else if (anim === 'jump') {
     targetL = 0.4;
@@ -625,6 +740,19 @@ export function animateCharacterRig(
     targetR = -1.25;
     targetLA = -0.85;
     targetRA = -0.85;
+  } else if (anim === 'drink') {
+    // Smooth sipping tea/coffee/juice animation raising right hand toward mouth
+    const sip = (Math.sin(elapsed * 3.8) + 1) * 0.5;
+    targetRA = -1.35 - sip * 0.82;
+    targetRAZ = 0.32 + sip * 0.12;
+    targetHeadY = Math.sin(elapsed * 1.6) * 0.08;
+    targetBodyY = Math.sin(elapsed * 2.2) * 0.015;
+  } else if (anim === 'eat') {
+    const bite = (Math.sin(elapsed * 4.8) + 1) * 0.5;
+    targetRA = -1.2 - bite * 0.88;
+    targetRAZ = 0.28;
+    targetLA = -0.5;
+    targetBodyY = Math.sin(elapsed * 2.6) * 0.018;
   } else if (anim === 'wave') {
     targetRA = -2.6;
     targetRAZ = -0.35 + Math.sin(elapsed * 12) * 0.28;
@@ -659,6 +787,10 @@ export function animateCharacterRig(
   } else {
     targetBodyY = Math.sin(elapsed * 2.2) * 0.015;
     targetHeadY = Math.sin(elapsed * 1.1) * 0.05;
+    if (rig.currentHeldItem !== 'none') {
+      targetRA = -0.95;
+      targetRAZ = 0.15;
+    }
   }
 
   rig.bodyGroup.position.y += (targetBodyY - rig.bodyGroup.position.y) * k;

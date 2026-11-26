@@ -18,12 +18,19 @@ import type {
   CustomShopType,
   EmoteType,
   GardenStyle,
+  HeldItemType,
   InteriorTheme,
   MingleEventState,
   MingleParticipant,
   MingleSelectedPair,
   NetworkPlayer,
+  PalaceVillaDef,
+  PublicAdDef,
+  PublicBusState,
   RelationshipStatus,
+  ShopSizeTier,
+  SportsBallState,
+  TypixelUpdateAlert,
   VehicleState,
   WorldPropertyOwnership,
 } from './src/shared/types.ts';
@@ -31,21 +38,35 @@ import { DEFAULT_APPEARANCE } from './src/shared/types.ts';
 import {
   ACTIVE_BUILDINGS,
   BUSINESSES,
+  CONDUCTOR_SALARY_PER_MIN,
   CUSTOM_HOME_PLANS,
   CUSTOM_SHOP_PLANS,
   DAILY_LOGIN_REWARDS,
+  FOOTBALL_PITCH_CENTER,
+  GAME_CENTER_GAMES,
+  HIDDEN_CARD_POS,
   INITIAL_VEHICLES,
+  MAX_WORLD_HALF_SIZE,
   MINGLE_MEETUP_LOCATIONS,
   MISSIONS,
+  PALACE_VILLAS,
   PROPERTIES,
+  PUBLIC_AD_PUBLISH_COST,
+  PUBLIC_BUS_FARE,
+  PUBLIC_BUS_ROUTE_STOPS,
   REWARDS,
   SHOP_ITEMS,
   SHOWCASE_ADS,
   VALLEY_SINGLES,
+  VOLLEYBALL_COURT_CENTER,
+  WEEKLY_REWARD_COOLDOWN_SEC,
   WORK_JOBS,
   WORLD_HALF_SIZE,
   WORLD_SPAWN,
+  computeHouseTotalPrice,
+  computeShopTotalPrice,
   groundHeightAt,
+  isPositionOnRoad,
 } from './src/shared/worldData.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -105,6 +126,8 @@ interface ServerPlayerRecord {
   lastDailyLoginDate: string;
   dailyLoginStreak: number;
   totalDailyLogins: number;
+  muscleLevel: number;
+  hasGameCenterCard: boolean;
   activeMingleMatch: MingleEventState['activeMatch'];
   ownedProperties: Set<string>;
   ownedBusinesses: Set<string>;
@@ -117,6 +140,9 @@ interface ServerPlayerRecord {
   workCooldowns: Map<string, number>;
   buildingCooldowns: Map<string, number>;
   dailyRewardReadyAt: number;
+  unlockedShopIds: Set<string>;
+  visitedVillaIds: Set<string>;
+  unlockedVillaIds: Set<string>;
 }
 
 const playersByUid = new Map<string, ServerPlayerRecord>();
@@ -125,6 +151,180 @@ const vehiclesById = new Map<string, VehicleState>();
 const worldProperties = new Map<string, WorldPropertyOwnership>();
 const customHomesById = new Map<string, CustomHomeDef>();
 const customShopsById = new Map<string, CustomShopDef>();
+const publicAdsById = new Map<string, PublicAdDef>();
+
+// Expandable Village Boundary (Admin can dynamically expand up to MAX_WORLD_HALF_SIZE!)
+let villageHalfSize = WORLD_HALF_SIZE;
+
+// Official Typixel Admin Alerts / Updates feed delivered to every player's Smartphone
+const typixelUpdates: TypixelUpdateAlert[] = [
+  {
+    id: 'upd_welcome_2026',
+    title: 'Welcome to Expanded Green Valley!',
+    message:
+      'Explore Hashim\'s Villa & Rifad\'s Villa, play Football & Volleyball, collect the Hidden VIP Card on Danger Peak Cliff for 50+ Game Center titles, and use your Smartphone for Private Calls!',
+    createdAtMs: Date.now(),
+    author: 'Typixel Admin',
+  },
+];
+
+// Active 1-on-1 Private Phone Calls
+interface ActivePhoneCall {
+  callId: string;
+  callerUid: string;
+  calleeUid: string;
+  status: 'ringing' | 'active';
+  startedAtMs: number;
+}
+const activePhoneCalls = new Map<string, ActivePhoneCall>();
+
+// Playable 3D Sports Balls (Football & Volleyball)
+const sportsBalls: Record<'football' | 'volleyball', SportsBallState> = {
+  football: {
+    id: 'football',
+    x: FOOTBALL_PITCH_CENTER.x,
+    y: 0.42,
+    z: FOOTBALL_PITCH_CENTER.z,
+    vx: 0,
+    vy: 0,
+    vz: 0,
+    scoreA: 0,
+    scoreB: 0,
+  },
+  volleyball: {
+    id: 'volleyball',
+    x: VOLLEYBALL_COURT_CENTER.x,
+    y: 0.36,
+    z: VOLLEYBALL_COURT_CENTER.z - 3,
+    vx: 0,
+    vy: 0,
+    vz: 0,
+    scoreA: 0,
+    scoreB: 0,
+  },
+};
+
+// Secure Server-Side Custom Admin Passcode Store (NO hardcoded plaintext password!)
+const ADMIN_USERNAME_EXPECTED = (process.env.ADMIN_USERNAME || 'typixelofficial').trim().toLowerCase();
+let adminPasscodeRecord: { salt: string; hash: string } | null = null;
+const adminSessionTokens = new Map<string, { username: string; expiresAt: number }>();
+
+function hashSecretScrypt(secret: string, saltHex: string): string {
+  return crypto.scryptSync(secret, saltHex, 32).toString('hex');
+}
+
+function verifySecretScrypt(secret: string, saltHex: string, expectedHex: string): boolean {
+  const actual = Buffer.from(hashSecretScrypt(secret, saltHex), 'hex');
+  const expected = Buffer.from(expectedHex, 'hex');
+  if (actual.length !== expected.length) return false;
+  return crypto.timingSafeEqual(actual, expected);
+}
+
+if (process.env.ADMIN_PASSWORD && process.env.ADMIN_PASSWORD.trim().length >= 6) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  adminPasscodeRecord = {
+    salt,
+    hash: hashSecretScrypt(process.env.ADMIN_PASSWORD.trim(), salt),
+  };
+}
+
+function issueAdminSessionToken(username: string): string {
+  const token = `adm_${crypto.randomBytes(24).toString('hex')}`;
+  adminSessionTokens.set(token, { username, expiresAt: Date.now() + 12 * 60 * 60 * 1000 });
+  return token;
+}
+
+function verifyAdminSessionToken(token: unknown): boolean {
+  if (typeof token !== 'string' || !token.startsWith('adm_')) return false;
+  const entry = adminSessionTokens.get(token);
+  if (!entry) return false;
+  if (Date.now() > entry.expiresAt) {
+    adminSessionTokens.delete(token);
+    return false;
+  }
+  return true;
+}
+
+// Hashim's Villa & Rifad's Villa — Grand Walled Palace Estates
+interface ServerPalaceVilla extends PalaceVillaDef {
+  keySalt: string;
+  keyHash: string;
+}
+const palaceVillasById = new Map<string, ServerPalaceVilla>();
+for (const v of PALACE_VILLAS) {
+  let keySalt = '';
+  let keyHash = '';
+  let hasKeySet = false;
+  if (v.villaId === 'hashim_villa' && process.env.HASHIM_VILLA_DEFAULT_KEY?.trim()) {
+    keySalt = crypto.randomBytes(16).toString('hex');
+    keyHash = hashSecretScrypt(process.env.HASHIM_VILLA_DEFAULT_KEY.trim(), keySalt);
+    hasKeySet = true;
+  }
+  palaceVillasById.set(v.villaId, {
+    ...v,
+    hasKeySet,
+    keySalt,
+    keyHash,
+  });
+}
+
+function toPublicVilla(v: ServerPalaceVilla): PalaceVillaDef {
+  return {
+    villaId: v.villaId,
+    boardName: v.boardName,
+    ownerUsername: v.ownerUsername,
+    ownerDisplayName: v.ownerDisplayName,
+    visitFee: v.visitFee,
+    hasKeySet: v.hasKeySet,
+    x: v.x,
+    z: v.z,
+    gatePos: v.gatePos,
+    doorPos: v.doorPos,
+    wallSize: v.wallSize,
+    accentColor: v.accentColor,
+  };
+}
+
+function isVillaOwner(rec: ServerPlayerRecord, villa: ServerPalaceVilla): boolean {
+  if (rec.isAdmin) return true;
+  const normIg = rec.state.instagramId.trim().toLowerCase();
+  const normName = rec.state.displayName.trim().toLowerCase();
+  const target = villa.ownerUsername.toLowerCase();
+  return normIg === target || normName === target;
+}
+
+function hashShopSecretKey(rawKey: string): string {
+  return crypto.createHash('sha256').update(`gv_shop_key::${rawKey.trim()}`).digest('hex');
+}
+
+// =========================================================================
+// FULL-TIME AUTONOMOUS RUNNING KSRTC PUBLIC TRANSPORT BUS
+// =========================================================================
+let busStopIdx = 0;
+let busWaitUntilMs = Date.now() + 3000;
+let busLastTickMs = Date.now();
+let busLastSalaryTickMs = Date.now();
+
+const publicBus: PublicBusState = {
+  id: 'public-ksrtc-express',
+  name: 'KSRTC Super Fast Public Express',
+  x: PUBLIC_BUS_ROUTE_STOPS[0].x,
+  y: 0,
+  z: PUBLIC_BUS_ROUTE_STOPS[0].z,
+  rotY: 0,
+  speed: 0,
+  fare: PUBLIC_BUS_FARE,
+  isAtStop: true,
+  currentStopName: PUBLIC_BUS_ROUTE_STOPS[0].name,
+  nextStopName: PUBLIC_BUS_ROUTE_STOPS[1].name,
+  conductorUid: null,
+  conductorName: '',
+  conductorStartedAtMs: 0,
+  conductorEarnedSalary: 0,
+  conductorFaresCollected: 0,
+  conductorTicketsIssued: 0,
+  passengers: [],
+};
 
 // In-memory cache for strictly allowlisted GitHub Showcase ad images
 const adImageCache = new Map<string, { buf: Buffer; contentType: string }>();
@@ -135,22 +335,20 @@ function getTodayDateKey(): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-function getYesterdayDateKey(): string {
-  const d = new Date(Date.now() - 86400000);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+function daysSinceDateKey(dateKey: string): number {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) return 999;
+  const [y, m, d] = dateKey.split('-').map(Number);
+  const then = Date.UTC(y, m - 1, d);
+  const nowDate = new Date();
+  const todayUtc = Date.UTC(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate());
+  return Math.floor((todayUtc - then) / 86400000);
 }
 
-function getNextHourTimestamp(): number {
-  const now = new Date();
-  const next = new Date(now);
-  next.setMinutes(0, 0, 0);
-  next.setHours(next.getHours() + 1);
-  return next.getTime();
-}
-
+// Max 5-Minute Single-to-Mingle Round Timer (Admin can reset anytime!)
+const MINGLE_MAX_ROUND_MS = 5 * 60 * 1000;
+let mingleNextEventAtMs = Date.now() + MINGLE_MAX_ROUND_MS;
 let currentMingleLocationIdx = 0;
-let lastAlarmHourKey = '';
-let lastMatchHourKey = '';
+let mingleAlarmSentForRound = 0;
 const mingleJoinedAt = new Map<string, number>();
 let currentSelectedPair: MingleSelectedPair | null = null;
 
@@ -208,12 +406,12 @@ function getJoinedMingleAccounts(): MingleParticipant[] {
 }
 
 function buildMingleStateForPlayer(rec: ServerPlayerRecord): MingleEventState {
-  const nextAt = getNextHourTimestamp();
-  const remainingMs = nextAt - Date.now();
+  const remainingMs = Math.max(0, mingleNextEventAtMs - Date.now());
   const loc = MINGLE_MEETUP_LOCATIONS[currentMingleLocationIdx % MINGLE_MEETUP_LOCATIONS.length];
   return {
-    nextEventAtMs: nextAt,
-    alarmActive: remainingMs <= 5 * 60 * 1000 && remainingMs > 0,
+    nextEventAtMs: mingleNextEventAtMs,
+    maxRoundDurationMs: MINGLE_MAX_ROUND_MS,
+    alarmActive: remainingMs <= 60 * 1000 && remainingMs > 0,
     locationName: loc.name,
     locationPos: loc.pos,
     isJoined: mingleJoinedAt.has(rec.state.uid),
@@ -261,6 +459,7 @@ const VALID_SHIRTS = new Set(['tee', 'jacket', 'hoodie', 'polo', 'shirt', 'mundu
 const VALID_ACCESSORIES = new Set(['none', 'glasses', 'cap', 'backpack', 'headphones']);
 const VALID_HOME_STYLES = new Set<CustomHomeStyle>(['cabin', 'modern', 'villa', 'manor']);
 const VALID_SHOP_TYPES = new Set<CustomShopType>(['tea_stall', 'juice_bar', 'bakery', 'boutique', 'tech_shop']);
+const VALID_SHOP_TIERS = new Set<ShopSizeTier>(['small', 'medium', 'large', 'palace']);
 const VALID_INTERIORS = new Set<InteriorTheme>(['modern', 'cozy', 'minimal', 'luxury']);
 const VALID_GARDENS = new Set<GardenStyle>(['flowers', 'zen', 'poolside', 'orchard']);
 const VALID_ANIMS = new Set<AnimationState>([
@@ -274,6 +473,18 @@ const VALID_ANIMS = new Set<AnimationState>([
   'cheer',
   'sit',
   'clap',
+  'drink',
+  'eat',
+]);
+const VALID_HELD_ITEMS = new Set<HeldItemType>([
+  'none',
+  'tea',
+  'latte',
+  'juice',
+  'snack',
+  'football',
+  'volleyball',
+  'cricket_bat',
 ]);
 const VALID_EMOTES = new Set<EmoteType>(['wave', 'dance', 'cheer', 'sit', 'clap']);
 const HEX_RE = /^#[0-9a-fA-F]{3,8}$/;
@@ -472,6 +683,9 @@ async function startServer(): Promise<void> {
     if (!authHeader.startsWith('Bearer ')) return null;
     const token = authHeader.slice(7).trim();
     if (!token) return null;
+    if (verifyAdminSessionToken(token)) {
+      return { uid: 'admin_custom', email: `${ADMIN_USERNAME_EXPECTED}@typixel.admin` };
+    }
     try {
       const decoded = await adminAuth.verifyIdToken(token);
       if (!isVerifiedAdminEmail(decoded.email, decoded.email_verified)) return null;
@@ -480,6 +694,65 @@ async function startServer(): Promise<void> {
       return null;
     }
   };
+
+  // =========================================================================
+  // SECURE CUSTOM ADMIN LOGIN & FIRST-RUN SETUP (No hardcoded passwords!)
+  // =========================================================================
+  app.get('/api/admin/status', (_req, res) => {
+    res.json({
+      configured: Boolean(adminPasscodeRecord),
+      expectedUsername: ADMIN_USERNAME_EXPECTED,
+    });
+  });
+
+  app.post('/api/admin/claim', (req, res) => {
+    const ip = String(req.ip || req.socket.remoteAddress || 'unknown');
+    if (isIgRateLimited(ip, 10)) {
+      res.status(429).json({ error: 'Too many attempts. Please wait a minute.' });
+      return;
+    }
+    if (adminPasscodeRecord) {
+      res.status(409).json({ error: 'Admin passcode is already configured. Please sign in.' });
+      return;
+    }
+    const username = sanitizeText(req.body?.username, 32).toLowerCase();
+    const password = typeof req.body?.password === 'string' ? req.body.password.trim() : '';
+    if (username !== ADMIN_USERNAME_EXPECTED) {
+      res.status(400).json({ error: `Admin username must be "${ADMIN_USERNAME_EXPECTED}".` });
+      return;
+    }
+    if (password.length < 6 || password.length > 64) {
+      res.status(400).json({ error: 'Admin password must be 6–64 characters.' });
+      return;
+    }
+    const salt = crypto.randomBytes(16).toString('hex');
+    adminPasscodeRecord = { salt, hash: hashSecretScrypt(password, salt) };
+    const token = issueAdminSessionToken(username);
+    res.json({ ok: true, adminToken: token, username });
+  });
+
+  app.post('/api/admin/login', (req, res) => {
+    const ip = String(req.ip || req.socket.remoteAddress || 'unknown');
+    if (isIgRateLimited(ip, 15)) {
+      res.status(429).json({ error: 'Too many login attempts. Please wait a minute.' });
+      return;
+    }
+    if (!adminPasscodeRecord) {
+      res.status(400).json({ error: 'Admin passcode not yet initialized. Claim it first.' });
+      return;
+    }
+    const username = sanitizeText(req.body?.username, 32).toLowerCase();
+    const password = typeof req.body?.password === 'string' ? req.body.password.trim() : '';
+    if (
+      username !== ADMIN_USERNAME_EXPECTED ||
+      !verifySecretScrypt(password, adminPasscodeRecord.salt, adminPasscodeRecord.hash)
+    ) {
+      res.status(401).json({ error: 'Invalid admin username or password.' });
+      return;
+    }
+    const token = issueAdminSessionToken(username);
+    res.json({ ok: true, adminToken: token, username });
+  });
 
   const checkLiveInstagramFollowing = async (
     igUsername: string,
@@ -679,7 +952,10 @@ async function startServer(): Promise<void> {
       if (!decoded.uid) {
         return next(new Error('Invalid Firebase ID token'));
       }
-      const isAdmin = isVerifiedAdminEmail(decoded.email, decoded.email_verified);
+      const adminToken = socket.handshake.auth?.adminToken;
+      const isAdmin =
+        isVerifiedAdminEmail(decoded.email, decoded.email_verified) ||
+        verifyAdminSessionToken(adminToken);
 
       socket.data.uid = decoded.uid;
       socket.data.email = decoded.email || '';
@@ -871,6 +1147,27 @@ async function startServer(): Promise<void> {
         }
       }
 
+      if (Array.isArray(payload?.knownPublicAds)) {
+        for (const rawAd of payload.knownPublicAds.slice(0, 40)) {
+          if (rawAd && typeof rawAd === 'object') {
+            const a = rawAd as Partial<PublicAdDef>;
+            const adId = typeof a.adId === 'string' ? a.adId.slice(0, 64) : '';
+            if (adId && !publicAdsById.has(adId) && typeof a.title === 'string') {
+              publicAdsById.set(adId, {
+                adId,
+                title: sanitizeText(a.title, 42) || 'Green Valley Ad',
+                subtitle: sanitizeText(a.subtitle, 96) || 'Visit us in Green Valley!',
+                instagramHandle: sanitizeInstagram(a.instagramHandle),
+                accentColor: typeof a.accentColor === 'string' && HEX_RE.test(a.accentColor) ? a.accentColor : '#f59e0b',
+                ownerUid: typeof a.ownerUid === 'string' ? a.ownerUid.slice(0, 128) : uid,
+                ownerName: sanitizeName(a.ownerName),
+                createdAtMs: typeof a.createdAtMs === 'number' ? a.createdAtMs : Date.now(),
+              });
+            }
+          }
+        }
+      }
+
       const age =
         typeof payload?.age === 'number' && Number.isFinite(payload.age)
           ? clamp(Math.round(payload.age), 18, 90)
@@ -892,6 +1189,11 @@ async function startServer(): Promise<void> {
         typeof payload?.totalDailyLogins === 'number' && Number.isFinite(payload.totalDailyLogins)
           ? clamp(Math.round(payload.totalDailyLogins), 0, 10000)
           : 0;
+      const muscleLevel =
+        typeof payload?.muscleLevel === 'number' && Number.isFinite(payload.muscleLevel)
+          ? clamp(Math.round(payload.muscleLevel), 0, 10)
+          : 0;
+      const hasGameCenterCard = Boolean(payload?.hasGameCenterCard);
 
       const isAdmin = Boolean(socket.data.isAdmin);
       const netState: NetworkPlayer = {
@@ -902,6 +1204,8 @@ async function startServer(): Promise<void> {
         age,
         relationshipStatus,
         partnerName: partnerName || undefined,
+        muscleLevel,
+        heldItem: 'none',
         appearance,
         x: spawnX,
         y: spawnY,
@@ -935,6 +1239,8 @@ async function startServer(): Promise<void> {
         lastDailyLoginDate,
         dailyLoginStreak,
         totalDailyLogins,
+        muscleLevel,
+        hasGameCenterCard,
         activeMingleMatch: null,
         ownedProperties: new Set(initProps),
         ownedBusinesses: new Set(initBiz),
@@ -946,10 +1252,15 @@ async function startServer(): Promise<void> {
         businessCooldowns: new Map(),
         workCooldowns: new Map(),
         buildingCooldowns: new Map(),
-        dailyRewardReadyAt: 0,
+        dailyRewardReadyAt:
+          lastDailyLoginDate && daysSinceDateKey(lastDailyLoginDate) < 7
+            ? Date.now() + (7 - daysSinceDateKey(lastDailyLoginDate)) * 86400000
+            : 0,
+        unlockedShopIds: new Set(),
+        visitedVillaIds: new Set(),
+        unlockedVillaIds: new Set(),
       };
       playersByUid.set(uid, record);
-      // Auto-join player into the free Single-to-Mingle live accounts screen
       if (!mingleJoinedAt.has(uid)) {
         mingleJoinedAt.set(uid, Date.now());
       }
@@ -967,11 +1278,17 @@ async function startServer(): Promise<void> {
         selfUid: uid,
         room: WORLD_ROOM,
         isAdmin,
+        villageHalfSize,
         players: allPlayers,
         vehicles: Array.from(vehiclesById.values()),
+        publicBus,
+        sportsBalls: Object.values(sportsBalls),
+        palaceVillas: Array.from(palaceVillasById.values()).map(toPublicVilla),
+        typixelUpdates: typixelUpdates.slice(0, 20),
         properties: Array.from(worldProperties.values()),
         customHomes: Array.from(customHomesById.values()),
         customShops: Array.from(customShopsById.values()),
+        publicAds: Array.from(publicAdsById.values()).sort((a, b) => b.createdAtMs - a.createdAtMs),
         mingleEvent: buildMingleStateForPlayer(record),
         voicePeers: activeVoicePeers,
       });
@@ -1028,10 +1345,10 @@ async function startServer(): Promise<void> {
         nextZ = rec.state.z + dz * scale;
       }
 
-      nextX = clamp(nextX, -WORLD_HALF_SIZE, WORLD_HALF_SIZE);
-      nextZ = clamp(nextZ, -WORLD_HALF_SIZE, WORLD_HALF_SIZE);
+      nextX = clamp(nextX, -villageHalfSize, villageHalfSize);
+      nextZ = clamp(nextZ, -villageHalfSize, villageHalfSize);
       const minY = groundHeightAt(nextX, nextZ) - 0.5;
-      const maxY = drivingVehicle?.canFly ? 76 : 26;
+      const maxY = drivingVehicle?.canFly ? 76 : 30;
       const nextY = clamp(targetY, minY, maxY);
 
       rec.state.x = nextX;
@@ -1455,13 +1772,14 @@ async function startServer(): Promise<void> {
       const now = Date.now();
       if (reward.repeatableSec) {
         if (now < rec.dailyRewardReadyAt) {
-          const secs = Math.ceil((rec.dailyRewardReadyAt - now) / 1000);
+          const daysLeft = Math.max(1, Math.ceil((rec.dailyRewardReadyAt - now) / 86400000));
           socket.emit('action:error', {
-            message: `Next check-in reward ready in ${secs}s.`,
+            message: `Weekly reward can only be claimed once per week! Ready again in ${daysLeft} day${daysLeft === 1 ? '' : 's'}.`,
           });
           return;
         }
-        rec.dailyRewardReadyAt = now + reward.repeatableSec * 1000;
+        rec.dailyRewardReadyAt = now + WEEKLY_REWARD_COOLDOWN_SEC * 1000;
+        rec.lastDailyLoginDate = getTodayDateKey();
       } else {
         if (rec.claimedRewards.has(reward.id)) {
           socket.emit('action:error', { message: 'Reward already claimed.' });
@@ -1530,7 +1848,7 @@ async function startServer(): Promise<void> {
     });
 
     // =========================================================================
-    // CUSTOM 3D HOME BUILDER (Admin builds FREE; normal players spend Green Coins)
+    // CUSTOM 3D HOME BUILDER (Road-Clearance Enforced + Tiered Facility Pricing!)
     // =========================================================================
     socket.on('home:build', (payload: Record<string, unknown>) => {
       const rec = playersByUid.get(uid);
@@ -1539,20 +1857,34 @@ async function startServer(): Promise<void> {
       const plan = CUSTOM_HOME_PLANS.find((p) => p.style === style);
       if (!plan) return;
 
-      const cost = rec.isAdmin ? 0 : plan.price;
-      if (cost > 0 && rec.greenCoins < cost) {
-        socket.emit('action:error', {
-          message: `Need ${plan.price} GC to build ${plan.label} (you have ${rec.greenCoins} GC).`,
-        });
-        return;
-      }
-
       const requestedX =
         typeof payload?.x === 'number' && Number.isFinite(payload.x) ? payload.x : rec.state.x + 14;
       const requestedZ =
         typeof payload?.z === 'number' && Number.isFinite(payload.z) ? payload.z : rec.state.z;
-      const coords = findSafeHomeCoordinates(requestedX, requestedZ);
+      const hx = clamp(requestedX, -villageHalfSize + 24, villageHalfSize - 24);
+      const hz = clamp(requestedZ, -villageHalfSize + 24, villageHalfSize - 24);
 
+      const roadCheck = isPositionOnRoad(hx, hz, Math.max(14, plan.size.x * 0.75));
+      if (roadCheck.onRoad) {
+        socket.emit('action:error', {
+          message: `${roadCheck.reason || 'Cannot build on roads!'} Use the Position Selector to pick an open plot.`,
+        });
+        return;
+      }
+
+      const hasPool = plan.defaultPool || payload?.hasPool === true;
+      const hasGarden = payload?.hasGarden === true;
+      const hasAc = payload?.hasAc === true;
+      const totalPrice = computeHouseTotalPrice(plan.style, { hasPool, hasGarden, hasAc });
+      const cost = rec.isAdmin ? 0 : totalPrice;
+      if (cost > 0 && rec.greenCoins < cost) {
+        socket.emit('action:error', {
+          message: `Need ${totalPrice} GC to build ${plan.label} with selected facilities (you have ${rec.greenCoins} GC).`,
+        });
+        return;
+      }
+
+      const hy = Math.max(0, groundHeightAt(hx, hz));
       const homeName = sanitizeHomeName(payload?.name || `${rec.state.displayName}'s ${plan.label}`);
       const wallColor =
         typeof payload?.wallColor === 'string' && HEX_RE.test(payload.wallColor)
@@ -1568,7 +1900,6 @@ async function startServer(): Promise<void> {
       const gardenStyle = VALID_GARDENS.has(String(payload?.gardenStyle) as GardenStyle)
         ? (payload.gardenStyle as GardenStyle)
         : 'flowers';
-      const hasPool = plan.defaultPool || payload?.hasPool === true;
 
       const homeId = `home_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
       const customHome: CustomHomeDef = {
@@ -1582,11 +1913,13 @@ async function startServer(): Promise<void> {
         wallColor,
         roofColor,
         hasPool,
+        hasGarden,
+        hasAc,
         interiorTheme,
         gardenStyle,
-        x: coords.x,
-        y: coords.y,
-        z: coords.z,
+        x: Number(hx.toFixed(1)),
+        y: Number(hy.toFixed(2)),
+        z: Number(hz.toFixed(1)),
       };
 
       if (cost > 0) {
@@ -1607,7 +1940,7 @@ async function startServer(): Promise<void> {
               tx: {
                 type: 'spend' as const,
                 amount: cost,
-                reason: `Built ${homeName}`,
+                reason: `Built ${homeName} (${plan.tierLabel})`,
                 balanceAfter: rec.greenCoins,
               },
             }
@@ -1615,8 +1948,8 @@ async function startServer(): Promise<void> {
         toast: {
           title: `Home Built: ${homeName}`,
           detail: rec.isAdmin
-            ? `Admin Free Build at (${Math.round(coords.x)}, ${Math.round(coords.z)})!`
-            : `Spawned at (${Math.round(coords.x)}, ${Math.round(coords.z)}) in Green Valley!`,
+            ? `Admin Free Build at (${Math.round(hx)}, ${Math.round(hz)})!`
+            : `Placed off-road at (${Math.round(hx)}, ${Math.round(hz)})!`,
           tone: 'emerald',
         },
       });
@@ -1655,7 +1988,20 @@ async function startServer(): Promise<void> {
         typeof payload?.x === 'number' && Number.isFinite(payload.x) ? payload.x : rec.state.x + 15;
       const requestedZ =
         typeof payload?.z === 'number' && Number.isFinite(payload.z) ? payload.z : rec.state.z;
-      const coords = findSafeHomeCoordinates(requestedX, requestedZ);
+      const hx = clamp(requestedX, -villageHalfSize + 24, villageHalfSize - 24);
+      const hz = clamp(requestedZ, -villageHalfSize + 24, villageHalfSize - 24);
+      const roadCheck = isPositionOnRoad(hx, hz, Math.max(14, plan.size.x * 0.75));
+      if (roadCheck.onRoad) {
+        socket.emit('action:error', {
+          message: `${roadCheck.reason || 'Cannot place homes on roads!'} Use the Position Selector to pick an off-road plot.`,
+        });
+        return;
+      }
+      const coords = {
+        x: Number(hx.toFixed(1)),
+        y: Number(Math.max(0, groundHeightAt(hx, hz)).toFixed(2)),
+        z: Number(hz.toFixed(1)),
+      };
 
       const homeName = sanitizeHomeName(payload?.name || `${ownerName}'s Residence`);
       const wallColor =
@@ -2053,14 +2399,27 @@ async function startServer(): Promise<void> {
       if (!item || !item.healthRestore) return;
 
       rec.inventory.splice(idx, 1);
+      const heldItem: HeldItemType = item.id.includes('latte') ? 'latte' : 'snack';
+      const nowHold = Date.now();
+      rec.state.heldItem = heldItem;
+      rec.state.heldItemUntil = nowHold + 11000;
+      rec.state.anim = heldItem === 'snack' ? 'eat' : 'drink';
+      rec.state.emoteUntil = nowHold + 4000;
+      io.to(WORLD_ROOM).emit('player:heldItem', {
+        uid,
+        heldItem,
+        heldItemUntil: rec.state.heldItemUntil,
+        anim: rec.state.anim,
+      });
       socket.emit('economy:update', {
         greenCoins: rec.greenCoins,
         xp: rec.xp,
         level: rec.level,
         inventory: [...rec.inventory],
         healthRestore: item.healthRestore,
+        heldItem,
         toast: {
-          title: `Used ${item.name}`,
+          title: `Enjoying ${item.name} in Hand!`,
           detail: `+${item.healthRestore} Health restored`,
           tone: 'emerald',
         },
@@ -2118,24 +2477,28 @@ async function startServer(): Promise<void> {
     });
 
     // =========================================================================
-    // DAILY LOGIN REWARD (7-Day Streak Tracked in Firestore Profile)
+    // WEEKLY REWARD BONUS (Strictly Once Per Week — 7-Day Cooldown Tracked in Firestore)
     // =========================================================================
     socket.on('daily:claim', () => {
       const rec = playersByUid.get(uid);
       if (!rec) return;
       const today = getTodayDateKey();
-      if (rec.lastDailyLoginDate === today) {
+      const daysElapsed = daysSinceDateKey(rec.lastDailyLoginDate);
+      if (rec.lastDailyLoginDate && daysElapsed < 7) {
+        const remainingDays = 7 - daysElapsed;
         socket.emit('action:error', {
-          message: 'Today’s Daily Login Reward is already claimed! Come back tomorrow.',
+          message: `Weekly Reward can only be claimed once per week! Next claim available in ${remainingDays} day${remainingDays === 1 ? '' : 's'}.`,
         });
         return;
       }
-      const yesterday = getYesterdayDateKey();
       const nextStreak =
-        rec.lastDailyLoginDate === yesterday ? Math.min(365, rec.dailyLoginStreak + 1) : 1;
+        rec.lastDailyLoginDate && daysElapsed <= 14
+          ? Math.min(365, rec.dailyLoginStreak + 1)
+          : 1;
       const tier = DAILY_LOGIN_REWARDS[(nextStreak - 1) % DAILY_LOGIN_REWARDS.length];
 
       rec.lastDailyLoginDate = today;
+      rec.dailyRewardReadyAt = Date.now() + WEEKLY_REWARD_COOLDOWN_SEC * 1000;
       rec.dailyLoginStreak = nextStreak;
       rec.totalDailyLogins = Math.min(10000, rec.totalDailyLogins + 1);
       rec.greenCoins = clamp(rec.greenCoins + tier.coins, 0, 10000000);
@@ -2150,22 +2513,23 @@ async function startServer(): Promise<void> {
         lastDailyLoginDate: rec.lastDailyLoginDate,
         dailyLoginStreak: rec.dailyLoginStreak,
         totalDailyLogins: rec.totalDailyLogins,
+        dailyRewardReadyAt: rec.dailyRewardReadyAt,
         tx: {
           type: 'earn',
           amount: tier.coins,
-          reason: `Daily Login Reward (Day ${nextStreak})`,
+          reason: `Weekly Reward (Week ${nextStreak})`,
           balanceAfter: rec.greenCoins,
         },
         toast: {
-          title: `Day ${nextStreak} Daily Bonus: +${tier.coins} GC!`,
-          detail: `${tier.label} · +${tier.xp} XP`,
+          title: `Week ${nextStreak} Reward: +${tier.coins} GC!`,
+          detail: `Claimed once this week · +${tier.xp} XP`,
           tone: 'amber',
         },
       });
     });
 
     // =========================================================================
-    // PLAYER-CREATED SHOPS (Tea Stall / Chaya Kada, Juice Bar, Bakery, Boutique, Tech)
+    // PLAYER-CREATED SHOPS OFF-ROAD + TIERED FACILITIES + SECRET OWNER KEY
     // =========================================================================
     socket.on('shop:open', (payload: Record<string, unknown>) => {
       const rec = playersByUid.get(uid);
@@ -2174,20 +2538,43 @@ async function startServer(): Promise<void> {
       const plan = CUSTOM_SHOP_PLANS.find((p) => p.shopType === shopType);
       if (!plan) return;
 
-      const cost = rec.isAdmin ? 0 : plan.price;
-      if (cost > 0 && rec.greenCoins < cost) {
+      const rawKey = typeof payload?.ownerKey === 'string' ? payload.ownerKey.trim() : '';
+      if (rawKey.length < 4 || rawKey.length > 24) {
         socket.emit('action:error', {
-          message: `Need ${plan.price} GC to open ${plan.label} (you have ${rec.greenCoins} GC).`,
+          message: 'Please set a Secret Owner Key (4–24 characters) to protect your shop interior.',
         });
         return;
       }
 
-      const rawX = typeof payload?.x === 'number' && Number.isFinite(payload.x) ? payload.x : rec.state.x + 6;
-      const rawZ = typeof payload?.z === 'number' && Number.isFinite(payload.z) ? payload.z : rec.state.z + 6;
-      const sx = clamp(rawX, -WORLD_HALF_SIZE + 25, WORLD_HALF_SIZE - 25);
-      const sz = clamp(rawZ, -WORLD_HALF_SIZE + 25, WORLD_HALF_SIZE - 25);
-      const sy = Math.max(0, groundHeightAt(sx, sz));
+      const sizeTier: ShopSizeTier = VALID_SHOP_TIERS.has(String(payload?.sizeTier) as ShopSizeTier)
+        ? (payload.sizeTier as ShopSizeTier)
+        : 'small';
+      const hasSeating = payload?.hasSeating === true;
+      const hasAc = payload?.hasAc === true;
 
+      const rawX = typeof payload?.x === 'number' && Number.isFinite(payload.x) ? payload.x : rec.state.x + 8;
+      const rawZ = typeof payload?.z === 'number' && Number.isFinite(payload.z) ? payload.z : rec.state.z + 8;
+      const sx = clamp(rawX, -villageHalfSize + 20, villageHalfSize - 20);
+      const sz = clamp(rawZ, -villageHalfSize + 20, villageHalfSize - 20);
+
+      const roadCheck = isPositionOnRoad(sx, sz, sizeTier === 'palace' ? 18 : 13);
+      if (roadCheck.onRoad) {
+        socket.emit('action:error', {
+          message: `${roadCheck.reason || 'Shops cannot be built on roads!'} Pick a green valid spot in the Position Selector.`,
+        });
+        return;
+      }
+
+      const totalPrice = computeShopTotalPrice(plan.price, sizeTier, { hasSeating, hasAc });
+      const cost = rec.isAdmin ? 0 : totalPrice;
+      if (cost > 0 && rec.greenCoins < cost) {
+        socket.emit('action:error', {
+          message: `Need ${totalPrice} GC to open ${plan.label} (${sizeTier}) — you have ${rec.greenCoins} GC.`,
+        });
+        return;
+      }
+
+      const sy = Math.max(0, groundHeightAt(sx, sz));
       const shopName = sanitizeHomeName(payload?.name || `${rec.state.displayName}'s ${plan.label}`);
       const awningColor =
         typeof payload?.awningColor === 'string' && HEX_RE.test(payload.awningColor)
@@ -2199,10 +2586,14 @@ async function startServer(): Promise<void> {
         shopId,
         name: shopName,
         shopType: plan.shopType,
+        sizeTier,
+        hasSeating,
+        hasAc,
         ownerUid: uid,
         ownerName: rec.state.displayName,
         ownerInstagram: rec.state.instagramId,
         awningColor,
+        ownerKeyHash: hashShopSecretKey(rawKey),
         x: Number(sx.toFixed(1)),
         y: Number(sy.toFixed(2)),
         z: Number(sz.toFixed(1)),
@@ -2223,16 +2614,80 @@ async function startServer(): Promise<void> {
               tx: {
                 type: 'spend' as const,
                 amount: cost,
-                reason: `Opened ${shopName}`,
+                reason: `Opened ${shopName} (${sizeTier})`,
                 balanceAfter: rec.greenCoins,
               },
             }
           : {}),
         toast: {
           title: `Shop Opened: ${shopName}!`,
-          detail: `Your ${plan.label} is live in Green Valley!`,
+          detail: `Placed off-road (${sizeTier.toUpperCase()}) · Enter inside with your secret key!`,
           tone: 'emerald',
         },
+      });
+    });
+
+    socket.on('shop:unlockInterior', (payload: Record<string, unknown>) => {
+      const rec = playersByUid.get(uid);
+      if (!rec) return;
+      const shopId = typeof payload?.shopId === 'string' ? payload.shopId : '';
+      const keyAttempt = typeof payload?.key === 'string' ? payload.key.trim() : '';
+      const shop = customShopsById.get(shopId);
+      if (!shop) {
+        socket.emit('action:error', { message: 'Shop not found.' });
+        return;
+      }
+      if (shop.ownerUid !== uid) {
+        socket.emit('action:error', {
+          message: 'Only the shop owner can enter inside this shop!',
+        });
+        return;
+      }
+      if (!shop.ownerKeyHash) {
+        rec.unlockedShopIds.add(shopId);
+        socket.emit('shop:interiorUnlocked', { shopId });
+        return;
+      }
+      if (!keyAttempt || hashShopSecretKey(keyAttempt) !== shop.ownerKeyHash) {
+        socket.emit('action:error', { message: 'Incorrect Shop Secret Key! Access denied.' });
+        return;
+      }
+      rec.unlockedShopIds.add(shopId);
+      socket.emit('shop:interiorUnlocked', { shopId });
+      socket.emit('toast:info', {
+        title: `Entered Inside ${shop.name}`,
+        detail: 'Owner interior unlocked! You can change your secret key from inside.',
+      });
+    });
+
+    socket.on('shop:changeKey', (payload: Record<string, unknown>) => {
+      const rec = playersByUid.get(uid);
+      if (!rec) return;
+      const shopId = typeof payload?.shopId === 'string' ? payload.shopId : '';
+      const newKey = typeof payload?.newKey === 'string' ? payload.newKey.trim() : '';
+      const shop = customShopsById.get(shopId);
+      if (!shop) {
+        socket.emit('action:error', { message: 'Shop not found.' });
+        return;
+      }
+      if (shop.ownerUid !== uid) {
+        socket.emit('action:error', { message: 'Only the shop owner can change the secret key.' });
+        return;
+      }
+      if (!rec.unlockedShopIds.has(shopId)) {
+        socket.emit('action:error', { message: 'Unlock and enter inside your shop first to change the key.' });
+        return;
+      }
+      if (newKey.length < 4 || newKey.length > 24) {
+        socket.emit('action:error', { message: 'New secret key must be 4–24 characters.' });
+        return;
+      }
+      shop.ownerKeyHash = hashShopSecretKey(newKey);
+      io.to(WORLD_ROOM).emit('customShop:updated', shop);
+      socket.emit('shop:keyChanged', { shop });
+      socket.emit('toast:info', {
+        title: 'Shop Secret Key Updated!',
+        detail: `New owner interior key saved for ${shop.name}.`,
       });
     });
 
@@ -2286,12 +2741,27 @@ async function startServer(): Promise<void> {
         });
       }
 
+      // Visibly equip the bought item in player's right hand & animate drinking/eating!
+      const equipItem: HeldItemType = item.heldItem || 'tea';
+      const nowHold = Date.now();
+      rec.state.heldItem = equipItem;
+      rec.state.heldItemUntil = nowHold + 12000;
+      rec.state.anim = equipItem === 'snack' ? 'eat' : 'drink';
+      rec.state.emoteUntil = nowHold + 4200;
+      io.to(WORLD_ROOM).emit('player:heldItem', {
+        uid,
+        heldItem: equipItem,
+        heldItemUntil: rec.state.heldItemUntil,
+        anim: rec.state.anim,
+      });
+
       socket.emit('economy:update', {
         greenCoins: rec.greenCoins,
         xp: rec.xp,
         level: rec.level,
         updatedShop: shop,
         healthRestore: item.healthRestore,
+        heldItem: equipItem,
         ...(cost > 0
           ? {
               tx: {
@@ -2303,7 +2773,7 @@ async function startServer(): Promise<void> {
             }
           : {}),
         toast: {
-          title: `Enjoyed ${item.name}!`,
+          title: `Enjoying ${item.name} in Hand!`,
           detail: `+${item.healthRestore} HP · +${item.xp} XP · Served by ${shop.ownerName}`,
           tone: 'emerald',
         },
@@ -2326,7 +2796,345 @@ async function startServer(): Promise<void> {
     });
 
     // =========================================================================
-    // ACTIVE BUILDING INTERIOR SERVICES (Hospital, Mall, Bank, School, KSRTC Depot, etc.)
+    // FULL-TIME RUNNING KSRTC PUBLIC BUS · CONDUCTOR SALARY · PASSENGER FARE & TICKETS
+    // =========================================================================
+    const payoutConductorSalary = (conductorRec: ServerPlayerRecord, reasonLabel: string) => {
+      const due = Math.floor(publicBus.conductorEarnedSalary);
+      if (due <= 0) return 0;
+      publicBus.conductorEarnedSalary = 0;
+      conductorRec.greenCoins = clamp(conductorRec.greenCoins + due, 0, 10000000);
+      conductorRec.xp = clamp(conductorRec.xp + Math.min(120, due), 0, 1000000);
+      conductorRec.level = levelFromXp(conductorRec.xp);
+      conductorRec.state.level = conductorRec.level;
+      io.to(conductorRec.socketId).emit('economy:update', {
+        greenCoins: conductorRec.greenCoins,
+        xp: conductorRec.xp,
+        level: conductorRec.level,
+        tx: {
+          type: 'earn',
+          amount: due,
+          reason: reasonLabel,
+          balanceAfter: conductorRec.greenCoins,
+        },
+        toast: {
+          title: `Conductor Salary Paid: +${due} GC!`,
+          detail: reasonLabel,
+          tone: 'amber',
+        },
+      });
+      return due;
+    };
+
+    socket.on('bus:becomeConductor', () => {
+      const rec = playersByUid.get(uid);
+      if (!rec) return;
+      if (publicBus.conductorUid && publicBus.conductorUid !== uid && playersByUid.has(publicBus.conductorUid)) {
+        socket.emit('action:error', {
+          message: `${publicBus.conductorName} is currently on Conductor duty. Try again when shift opens!`,
+        });
+        return;
+      }
+      // Remove from passengers list if currently riding as passenger
+      publicBus.passengers = publicBus.passengers.filter((p) => p.uid !== uid);
+      publicBus.conductorUid = uid;
+      publicBus.conductorName = rec.state.displayName;
+      publicBus.conductorStartedAtMs = Date.now();
+      publicBus.conductorEarnedSalary = 0;
+      publicBus.conductorFaresCollected = 0;
+      publicBus.conductorTicketsIssued = 0;
+      busLastSalaryTickMs = Date.now();
+
+      // Release any personal vehicle
+      if (rec.state.vehicleId) {
+        const oldVeh = vehiclesById.get(rec.state.vehicleId);
+        if (oldVeh && oldVeh.driverUid === uid) {
+          oldVeh.driverUid = null;
+          oldVeh.speed = 0;
+          io.to(WORLD_ROOM).emit('vehicle:updated', oldVeh);
+        }
+        rec.state.vehicleId = null;
+      }
+
+      io.to(WORLD_ROOM).emit('bus:update', publicBus);
+      socket.emit('toast:info', {
+        title: 'On Duty: KSRTC Bus Conductor!',
+        detail: `Earning ${CONDUCTOR_SALARY_PER_MIN} GC/min + passenger fares. Issue tickets to passengers!`,
+      });
+    });
+
+    socket.on('bus:leaveConductor', () => {
+      const rec = playersByUid.get(uid);
+      if (!rec || publicBus.conductorUid !== uid) return;
+      const minsSpent = Math.max(1, Math.round((Date.now() - publicBus.conductorStartedAtMs) / 60000));
+      payoutConductorSalary(rec, `KSRTC Conductor Shift Salary (${minsSpent} min on duty)`);
+      publicBus.conductorUid = null;
+      publicBus.conductorName = '';
+      publicBus.conductorStartedAtMs = 0;
+      publicBus.conductorEarnedSalary = 0;
+      publicBus.conductorFaresCollected = 0;
+      publicBus.conductorTicketsIssued = 0;
+      io.to(WORLD_ROOM).emit('bus:update', publicBus);
+      socket.emit('toast:info', {
+        title: 'Conductor Shift Completed',
+        detail: 'You stepped off the KSRTC Public Express.',
+      });
+    });
+
+    socket.on('bus:boardPassenger', () => {
+      const rec = playersByUid.get(uid);
+      if (!rec) return;
+      if (publicBus.conductorUid === uid) {
+        socket.emit('toast:info', { title: 'Already On Bus', detail: 'You are currently the Bus Conductor!' });
+        return;
+      }
+      if (publicBus.passengers.some((p) => p.uid === uid)) {
+        socket.emit('bus:update', publicBus);
+        return;
+      }
+      if (rec.state.vehicleId) {
+        const oldVeh = vehiclesById.get(rec.state.vehicleId);
+        if (oldVeh && oldVeh.driverUid === uid) {
+          oldVeh.driverUid = null;
+          oldVeh.speed = 0;
+          io.to(WORLD_ROOM).emit('vehicle:updated', oldVeh);
+        }
+        rec.state.vehicleId = null;
+      }
+      publicBus.passengers.push({
+        uid,
+        displayName: rec.state.displayName,
+        instagramId: rec.state.instagramId,
+        paidFare: false,
+        hasTicket: false,
+        ticketCode: '',
+        boardedAtMs: Date.now(),
+      });
+      io.to(WORLD_ROOM).emit('bus:update', publicBus);
+      socket.emit('toast:info', {
+        title: 'Boarded KSRTC Public Express!',
+        detail: `Pay ${PUBLIC_BUS_FARE} GC fare to get your official ticket from the Conductor.`,
+      });
+    });
+
+    socket.on('bus:leaveBus', () => {
+      const before = publicBus.passengers.length;
+      publicBus.passengers = publicBus.passengers.filter((p) => p.uid !== uid);
+      if (publicBus.passengers.length !== before) {
+        io.to(WORLD_ROOM).emit('bus:update', publicBus);
+        socket.emit('toast:info', {
+          title: 'Exited KSRTC Bus',
+          detail: `Dropped off near ${publicBus.currentStopName}.`,
+        });
+      }
+    });
+
+    socket.on('bus:payFare', () => {
+      const rec = playersByUid.get(uid);
+      if (!rec) return;
+      const passenger = publicBus.passengers.find((p) => p.uid === uid);
+      if (!passenger) {
+        socket.emit('action:error', { message: 'Board the running KSRTC Bus first to pay your fare.' });
+        return;
+      }
+      if (passenger.paidFare) {
+        socket.emit('toast:info', { title: 'Fare Already Paid', detail: 'Your bus fare is already paid!' });
+        return;
+      }
+      const cost = rec.isAdmin ? 0 : PUBLIC_BUS_FARE;
+      if (cost > 0 && rec.greenCoins < cost) {
+        socket.emit('action:error', { message: `Need ${PUBLIC_BUS_FARE} GC for bus fare.` });
+        return;
+      }
+      if (cost > 0) rec.greenCoins -= cost;
+      passenger.paidFare = true;
+
+      const conductorRec = publicBus.conductorUid ? playersByUid.get(publicBus.conductorUid) : null;
+      if (conductorRec && conductorRec.state.uid !== uid) {
+        publicBus.conductorFaresCollected += PUBLIC_BUS_FARE;
+        conductorRec.greenCoins = clamp(conductorRec.greenCoins + PUBLIC_BUS_FARE, 0, 10000000);
+        io.to(conductorRec.socketId).emit('economy:update', {
+          greenCoins: conductorRec.greenCoins,
+          xp: conductorRec.xp,
+          level: conductorRec.level,
+          tx: {
+            type: 'earn',
+            amount: PUBLIC_BUS_FARE,
+            reason: `Bus Fare from ${rec.state.displayName}`,
+            balanceAfter: conductorRec.greenCoins,
+          },
+          toast: {
+            title: `Bus Fare Received: +${PUBLIC_BUS_FARE} GC`,
+            detail: `${rec.state.displayName} paid fare — Issue their ticket now!`,
+            tone: 'amber',
+          },
+        });
+      } else {
+        // Auto-issue ticket if no live human conductor is currently on duty
+        passenger.hasTicket = true;
+        passenger.ticketCode = `KSRTC-${Math.floor(1000 + Math.random() * 9000)}`;
+      }
+
+      io.to(WORLD_ROOM).emit('bus:update', publicBus);
+      socket.emit('economy:update', {
+        greenCoins: rec.greenCoins,
+        xp: rec.xp,
+        level: rec.level,
+        ...(cost > 0
+          ? {
+              tx: {
+                type: 'spend' as const,
+                amount: cost,
+                reason: 'KSRTC Public Bus Fare',
+                balanceAfter: rec.greenCoins,
+              },
+            }
+          : {}),
+        toast: {
+          title: passenger.hasTicket ? `Ticket Issued: ${passenger.ticketCode}` : 'Fare Paid to Conductor!',
+          detail: passenger.hasTicket
+            ? 'Auto-ticket issued — enjoy the KSRTC scenic loop!'
+            : `Paid ${PUBLIC_BUS_FARE} GC to Conductor ${publicBus.conductorName}. Waiting for ticket!`,
+          tone: 'emerald',
+        },
+      });
+    });
+
+    socket.on('bus:issueTicket', (payload: Record<string, unknown>) => {
+      const rec = playersByUid.get(uid);
+      if (!rec) return;
+      if (publicBus.conductorUid !== uid) {
+        socket.emit('action:error', { message: 'Only the active Bus Conductor can issue tickets.' });
+        return;
+      }
+      const targetUid = typeof payload?.passengerUid === 'string' ? payload.passengerUid : '';
+      const passenger = publicBus.passengers.find((p) => p.uid === targetUid);
+      if (!passenger) {
+        socket.emit('action:error', { message: 'Passenger is no longer on the bus.' });
+        return;
+      }
+      if (passenger.hasTicket) {
+        socket.emit('toast:info', { title: 'Ticket Already Issued', detail: `${passenger.displayName} already holds ${passenger.ticketCode}.` });
+        return;
+      }
+
+      const ticketCode = `KSRTC-${Math.floor(1000 + Math.random() * 9000)}`;
+      passenger.hasTicket = true;
+      passenger.ticketCode = ticketCode;
+      publicBus.conductorTicketsIssued += 1;
+
+      const bonus = 12;
+      rec.greenCoins = clamp(rec.greenCoins + bonus, 0, 10000000);
+      rec.xp = clamp(rec.xp + 20, 0, 1000000);
+      rec.level = levelFromXp(rec.xp);
+      rec.state.level = rec.level;
+
+      io.to(WORLD_ROOM).emit('bus:update', publicBus);
+      socket.emit('economy:update', {
+        greenCoins: rec.greenCoins,
+        xp: rec.xp,
+        level: rec.level,
+        tx: {
+          type: 'earn',
+          amount: bonus,
+          reason: `Issued KSRTC Ticket ${ticketCode}`,
+          balanceAfter: rec.greenCoins,
+        },
+        toast: {
+          title: `Ticket Issued: ${ticketCode}`,
+          detail: `Handed to ${passenger.displayName} (+${bonus} GC bonus · +20 XP)`,
+          tone: 'emerald',
+        },
+      });
+
+      const passRec = playersByUid.get(targetUid);
+      if (passRec) {
+        io.to(passRec.socketId).emit('toast:info', {
+          title: `Official Bus Ticket: ${ticketCode}`,
+          detail: `Issued by Conductor ${rec.state.displayName} aboard KSRTC Public Express!`,
+        });
+      }
+    });
+
+    // =========================================================================
+    // PUBLIC AD CENTER (Spend Green Coins to Publish Public Ads Across Village)
+    // =========================================================================
+    socket.on('ads:publish', (payload: Record<string, unknown>) => {
+      const rec = playersByUid.get(uid);
+      if (!rec) return;
+      const title = sanitizeText(payload?.title, 42);
+      const subtitle = sanitizeText(payload?.subtitle, 96);
+      const instagramHandle = sanitizeInstagram(payload?.instagramHandle || rec.state.instagramId);
+      const accentColor =
+        typeof payload?.accentColor === 'string' && HEX_RE.test(payload.accentColor)
+          ? payload.accentColor
+          : '#f59e0b';
+
+      if (title.length < 2 || subtitle.length < 2) {
+        socket.emit('action:error', { message: 'Enter an ad headline and description (min 2 chars each).' });
+        return;
+      }
+
+      const cost = rec.isAdmin ? 0 : PUBLIC_AD_PUBLISH_COST;
+      if (cost > 0 && rec.greenCoins < cost) {
+        socket.emit('action:error', {
+          message: `Need ${PUBLIC_AD_PUBLISH_COST} GC to publish a public ad (you have ${rec.greenCoins} GC).`,
+        });
+        return;
+      }
+
+      if (cost > 0) rec.greenCoins -= cost;
+      rec.xp = clamp(rec.xp + 60, 0, 1000000);
+      rec.level = levelFromXp(rec.xp);
+      rec.state.level = rec.level;
+
+      const adId = `ad_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+      const newAd: PublicAdDef = {
+        adId,
+        title,
+        subtitle,
+        instagramHandle,
+        accentColor,
+        ownerUid: uid,
+        ownerName: rec.state.displayName,
+        createdAtMs: Date.now(),
+      };
+      publicAdsById.set(adId, newAd);
+      io.to(WORLD_ROOM).emit('publicAd:created', newAd);
+      io.to(WORLD_ROOM).emit('chat:message', {
+        id: `sys_ad_${Date.now()}`,
+        uid: 'system',
+        displayName: 'Green Valley Ad Center',
+        photoURL: '',
+        channel: 'system',
+        text: `📢 Public Ad by ${rec.state.displayName}: "${title}" — ${subtitle}${instagramHandle ? ` (@${instagramHandle})` : ''}`,
+        timestamp: Date.now(),
+      });
+
+      socket.emit('economy:update', {
+        greenCoins: rec.greenCoins,
+        xp: rec.xp,
+        level: rec.level,
+        createdPublicAd: newAd,
+        ...(cost > 0
+          ? {
+              tx: {
+                type: 'spend' as const,
+                amount: cost,
+                reason: `Published Public Ad: ${title}`,
+                balanceAfter: rec.greenCoins,
+              },
+            }
+          : {}),
+        toast: {
+          title: 'Public Ad Published Live!',
+          detail: `"${title}" is now broadcasting across Green Valley billboards & HUD!`,
+          tone: 'amber',
+        },
+      });
+    });
+
+    // =========================================================================
+    // ACTIVE BUILDING INTERIOR SERVICES (Hospital, Gym Body Building, Park, Ad Center, Mall, Bank, etc.)
     // =========================================================================
     socket.on('building:service', (payload: Record<string, unknown>) => {
       const rec = playersByUid.get(uid);
@@ -2361,10 +3169,42 @@ async function startServer(): Promise<void> {
       rec.level = levelFromXp(rec.xp);
       rec.state.level = rec.level;
 
+      let muscleChanged = false;
+      if (svc.muscleGain && svc.muscleGain > 0) {
+        rec.muscleLevel = clamp(rec.muscleLevel + svc.muscleGain, 0, 10);
+        rec.state.muscleLevel = rec.muscleLevel;
+        muscleChanged = true;
+        io.to(WORLD_ROOM).emit('player:appearance', {
+          uid,
+          displayName: rec.state.displayName,
+          instagramId: rec.state.instagramId,
+          age: rec.age,
+          relationshipStatus: rec.relationshipStatus,
+          muscleLevel: rec.muscleLevel,
+          appearance: rec.state.appearance,
+          isAdmin: rec.isAdmin,
+        });
+      }
+
+      if (svc.heldItem && VALID_HELD_ITEMS.has(svc.heldItem)) {
+        const nowHold = Date.now();
+        rec.state.heldItem = svc.heldItem;
+        rec.state.heldItemUntil = nowHold + 12000;
+        rec.state.anim = svc.heldItem === 'snack' ? 'eat' : 'drink';
+        rec.state.emoteUntil = nowHold + 4200;
+        io.to(WORLD_ROOM).emit('player:heldItem', {
+          uid,
+          heldItem: svc.heldItem,
+          heldItemUntil: rec.state.heldItemUntil,
+          anim: rec.state.anim,
+        });
+      }
+
       socket.emit('economy:update', {
         greenCoins: rec.greenCoins,
         xp: rec.xp,
         level: rec.level,
+        ...(muscleChanged ? { muscleLevel: rec.muscleLevel } : {}),
         healthRestore: svc.healthRestore,
         teleportTo: svc.teleportTo,
         ...(cost > 0
@@ -2387,27 +3227,91 @@ async function startServer(): Promise<void> {
               }
             : {}),
         toast: {
-          title: svc.label,
+          title: muscleChanged ? `Body Built! Muscle Lv.${rec.muscleLevel}/10` : svc.label,
           detail:
-            gain > 0
-              ? `+${gain} GC${svc.rewardXp ? ` · +${svc.rewardXp} XP` : ''}`
-              : svc.teleportLabel
-                ? `Arriving at ${svc.teleportLabel}`
-                : svc.healthRestore
-                  ? `Health restored (+${svc.healthRestore} HP)`
-                  : bldg.name,
+            muscleChanged
+              ? `${svc.label} · Your 3D physique grew stronger! (+${svc.rewardXp || 0} XP)`
+              : gain > 0
+                ? `+${gain} GC${svc.rewardXp ? ` · +${svc.rewardXp} XP` : ''}`
+                : svc.teleportLabel
+                  ? `Arriving at ${svc.teleportLabel}`
+                  : svc.healthRestore
+                    ? `Health restored (+${svc.healthRestore} HP)`
+                    : bldg.name,
           tone: gain > 0 ? 'amber' : 'emerald',
         },
       });
     });
 
     // =========================================================================
-    // FREE SINGLE-TO-MINGLE: Live Joined Accounts, Auto-Select 2 Accounts, DP Reveal, Free Marriage & Free Honeymoon
+    // FREE SINGLE-TO-MINGLE: Live 3D Screen, Max 5-Min Timer + Admin Reset,
+    // Smart Gender-Specific Decline Re-Selection, Food to ALL & Free Honeymoon
     // =========================================================================
     const broadcastMingleToAll = () => {
       for (const p of playersByUid.values()) {
         io.to(p.socketId).emit('mingle:update', buildMingleStateForPlayer(p));
       }
+    };
+
+    const assignPairAndBroadcast = (
+      partA: MingleParticipant,
+      partB: MingleParticipant,
+      matchId: string,
+      loc: { name: string; pos: { x: number; y: number; z: number } },
+      opts?: { aAccepted?: boolean; bAccepted?: boolean; replacedGender?: 'male' | 'female' },
+    ) => {
+      const aAccepted = Boolean(opts?.aAccepted || partA.isNpc);
+      const bAccepted = Boolean(opts?.bAccepted || partB.isNpc);
+      const recA = !partA.isNpc ? playersByUid.get(partA.uid) : null;
+      const recB = !partB.isNpc ? playersByUid.get(partB.uid) : null;
+
+      if (recA) {
+        recA.activeMingleMatch = {
+          matchId,
+          partnerUid: partB.uid,
+          partnerName: partB.displayName,
+          partnerInstagram: partB.instagramId,
+          partnerPhotoURL: partB.photoURL,
+          partnerAppearance: partB.appearance,
+          partnerAge: partB.age,
+          partnerGender: partB.gender,
+          isNpcPartner: Boolean(partB.isNpc),
+          myAccepted: aAccepted,
+          partnerAccepted: bAccepted,
+          status: 'proposed',
+        };
+      }
+      if (recB) {
+        recB.activeMingleMatch = {
+          matchId,
+          partnerUid: partA.uid,
+          partnerName: partA.displayName,
+          partnerInstagram: partA.instagramId,
+          partnerPhotoURL: partA.photoURL,
+          partnerAppearance: partA.appearance,
+          partnerAge: partA.age,
+          partnerGender: partA.gender,
+          isNpcPartner: Boolean(partA.isNpc),
+          myAccepted: bAccepted,
+          partnerAccepted: aAccepted,
+          status: 'proposed',
+        };
+      }
+
+      currentSelectedPair = {
+        matchId,
+        memberA: partA,
+        memberB: partB,
+        selectedAt: Date.now(),
+        locationName: loc.name,
+        locationPos: loc.pos,
+        status: 'proposed',
+        memberAAccepted: aAccepted,
+        memberBAccepted: bAccepted,
+        lastReplacedGender: opts?.replacedGender,
+      };
+      mingleNextEventAtMs = Date.now() + MINGLE_MAX_ROUND_MS;
+      broadcastMingleToAll();
     };
 
     const autoSelectTwoAccountsFromScreen = (requester?: ServerPlayerRecord) => {
@@ -2422,131 +3326,45 @@ async function startServer(): Promise<void> {
       }
       if (joinedRecords.length === 0) return;
 
-      // Shuffle joined accounts for fair random selection from screen
       const shuffled = [...joinedRecords].sort(() => Math.random() - 0.5);
       const loc = MINGLE_MEETUP_LOCATIONS[currentMingleLocationIdx % MINGLE_MEETUP_LOCATIONS.length];
       const matchId = `mingle_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
 
-      let recA: ServerPlayerRecord | null = null;
-      let recB: ServerPlayerRecord | null = null;
+      let partA: MingleParticipant;
+      let partB: MingleParticipant;
 
       if (shuffled.length >= 2) {
-        // Prefer 1 male + 1 female real account from joined screen; otherwise pick any 2 real joined accounts
         const men = shuffled.filter((r) => r.state.appearance.gender === 'male');
         const women = shuffled.filter((r) => r.state.appearance.gender === 'female');
         if (men.length > 0 && women.length > 0) {
-          recA = men[0];
-          recB = women[0];
+          partA = toMingleParticipant(men[0]);
+          partB = toMingleParticipant(women[0]);
         } else {
-          recA = shuffled[0];
-          recB = shuffled[1];
+          partA = toMingleParticipant(shuffled[0]);
+          partB = toMingleParticipant(shuffled[1]);
         }
       } else {
-        recA = shuffled[0];
-      }
-
-      if (recA && recB) {
-        const partA = toMingleParticipant(recA);
-        const partB = toMingleParticipant(recB);
-
-        recA.activeMingleMatch = {
-          matchId,
-          partnerUid: partB.uid,
-          partnerName: partB.displayName,
-          partnerInstagram: partB.instagramId,
-          partnerPhotoURL: partB.photoURL,
-          partnerAppearance: partB.appearance,
-          partnerAge: partB.age,
-          partnerGender: partB.gender,
-          isNpcPartner: false,
-          myAccepted: false,
-          partnerAccepted: false,
-          status: 'proposed',
-        };
-        recB.activeMingleMatch = {
-          matchId,
-          partnerUid: partA.uid,
-          partnerName: partA.displayName,
-          partnerInstagram: partA.instagramId,
-          partnerPhotoURL: partA.photoURL,
-          partnerAppearance: partA.appearance,
-          partnerAge: partA.age,
-          partnerGender: partA.gender,
-          isNpcPartner: false,
-          myAccepted: false,
-          partnerAccepted: false,
-          status: 'proposed',
-        };
-
-        currentSelectedPair = {
-          matchId,
-          memberA: partA,
-          memberB: partB,
-          selectedAt: Date.now(),
-          locationName: loc.name,
-          locationPos: loc.pos,
-          status: 'proposed',
-          memberAAccepted: false,
-          memberBAccepted: false,
-        };
-
-        broadcastMingleToAll();
-
-        io.to(WORLD_ROOM).emit('toast:info', {
-          title: '2 Accounts Auto-Selected (FREE)!',
-          detail: `${partA.displayName} ♥ ${partB.displayName} selected at ${loc.name}!`,
-        });
-        io.to(WORLD_ROOM).emit('chat:message', {
-          id: `sys_mingle_${Date.now()}`,
-          uid: 'system',
-          displayName: 'Single-to-Mingle Spotlight',
-          photoURL: '',
-          channel: 'system',
-          text: `💘 Auto-Selected Couple: ${partA.displayName} & ${partB.displayName}! Open Single-to-Mingle to view their DPs (100% Free).`,
-          timestamp: Date.now(),
-        });
-      } else if (recA) {
-        // Solo fallback when only 1 real account is online right now
-        const wantedGender = recA.state.appearance.gender === 'male' ? 'female' : 'male';
+        partA = toMingleParticipant(shuffled[0]);
+        const wantedGender = partA.gender === 'male' ? 'female' : 'male';
         const pool = VALLEY_SINGLES.filter((n) => n.gender === wantedGender);
         const pick = pool[Math.floor(Math.random() * pool.length)] || VALLEY_SINGLES[0];
-        const partA = toMingleParticipant(recA);
-        const partB = npcToMingleParticipant(pick);
-
-        recA.activeMingleMatch = {
-          matchId,
-          partnerUid: partB.uid,
-          partnerName: partB.displayName,
-          partnerInstagram: partB.instagramId,
-          partnerPhotoURL: partB.photoURL,
-          partnerAppearance: partB.appearance,
-          partnerAge: partB.age,
-          partnerGender: partB.gender,
-          isNpcPartner: true,
-          myAccepted: false,
-          partnerAccepted: true,
-          status: 'proposed',
-        };
-
-        currentSelectedPair = {
-          matchId,
-          memberA: partA,
-          memberB: partB,
-          selectedAt: Date.now(),
-          locationName: loc.name,
-          locationPos: loc.pos,
-          status: 'proposed',
-          memberAAccepted: false,
-          memberBAccepted: true,
-        };
-
-        broadcastMingleToAll();
-
-        io.to(recA.socketId).emit('toast:info', {
-          title: 'Free Single-to-Mingle Match Selected!',
-          detail: `${partA.displayName} ♥ ${partB.displayName} at ${loc.name} (100% Free)!`,
-        });
+        partB = npcToMingleParticipant(pick);
       }
+
+      assignPairAndBroadcast(partA, partB, matchId, loc);
+      io.to(WORLD_ROOM).emit('toast:info', {
+        title: 'Live Screen Selected 2 Members (FREE)!',
+        detail: `${partA.displayName} ♥ ${partB.displayName} — DPs live on Mingle Screen!`,
+      });
+      io.to(WORLD_ROOM).emit('chat:message', {
+        id: `sys_mingle_${Date.now()}`,
+        uid: 'system',
+        displayName: 'Mingle Live Screen',
+        photoURL: '',
+        channel: 'system',
+        text: `💘 Live Mingle Screen selected ${partA.displayName} (@${partA.instagramId || 'valley'}) ♥ ${partB.displayName} (@${partB.instagramId || 'valley'})!`,
+        timestamp: Date.now(),
+      });
     };
 
     socket.on('mingle:join', () => {
@@ -2558,7 +3376,7 @@ async function startServer(): Promise<void> {
       broadcastMingleToAll();
       socket.emit('toast:info', {
         title: 'Joined Single-to-Mingle (FREE)!',
-        detail: 'Your account & DP are now live on the Single-to-Mingle screen.',
+        detail: 'Your Name & ID are now live on the 3D Mingle Screen.',
       });
     });
 
@@ -2579,17 +3397,39 @@ async function startServer(): Promise<void> {
       autoSelectTwoAccountsFromScreen(rec);
     });
 
+    // Admin Reset for Max 5-Minute Mingle Timer & Active Round
+    socket.on('mingle:adminReset', () => {
+      const rec = playersByUid.get(uid);
+      if (!rec || !rec.isAdmin) {
+        socket.emit('action:error', { message: 'Only Admin can reset the Single-to-Mingle timer.' });
+        return;
+      }
+      mingleNextEventAtMs = Date.now() + MINGLE_MAX_ROUND_MS;
+      mingleAlarmSentForRound = 0;
+      currentSelectedPair = null;
+      for (const p of playersByUid.values()) {
+        p.activeMingleMatch = null;
+      }
+      broadcastMingleToAll();
+      io.to(WORLD_ROOM).emit('toast:info', {
+        title: 'Admin Reset Single-to-Mingle!',
+        detail: 'Fresh 5-minute Mingle countdown started — ready for new selections!',
+      });
+    });
+
     socket.on('mingle:triggerDemo', (payload: Record<string, unknown>) => {
       const rec = playersByUid.get(uid);
       if (!rec) return;
       const mode = payload?.mode === 'alarm' ? 'alarm' : 'match';
       const loc = MINGLE_MEETUP_LOCATIONS[currentMingleLocationIdx % MINGLE_MEETUP_LOCATIONS.length];
       if (mode === 'alarm') {
+        mingleNextEventAtMs = Date.now() + 60 * 1000;
         io.to(WORLD_ROOM).emit('mingle:alarm', {
           locationName: loc.name,
           locationPos: loc.pos,
-          nextEventAtMs: Date.now() + 5 * 60 * 1000,
+          nextEventAtMs: mingleNextEventAtMs,
         });
+        broadcastMingleToAll();
       } else {
         autoSelectTwoAccountsFromScreen(rec);
       }
@@ -2602,18 +3442,74 @@ async function startServer(): Promise<void> {
       const match = rec.activeMingleMatch;
       const partnerRec = !match.isNpcPartner ? playersByUid.get(match.partnerUid) : null;
 
+      // SMART GENDER-SPECIFIC DECLINE:
+      // If BOY declines -> keep the GIRL the same and auto-select ONLY a new BOY!
+      // If GIRL declines -> keep the BOY the same and auto-select ONLY a new GIRL!
       if (!accept) {
+        const declinerGender = rec.state.appearance.gender;
+        const pair = currentSelectedPair && currentSelectedPair.matchId === match.matchId ? currentSelectedPair : null;
         rec.activeMingleMatch = null;
+
+        if (pair) {
+          const declinerIsA = pair.memberA.uid === uid;
+          const keptMember = declinerIsA ? pair.memberB : pair.memberA;
+          const keptWasAccepted = declinerIsA ? pair.memberBAccepted : pair.memberAAccepted;
+
+          // Pick a replacement of the SAME gender as the person who declined (excluding decliner & kept member)
+          const joinedSameGender: ServerPlayerRecord[] = [];
+          for (const joinedUid of mingleJoinedAt.keys()) {
+            if (joinedUid === uid || joinedUid === keptMember.uid) continue;
+            const candidate = playersByUid.get(joinedUid);
+            if (candidate && candidate.state.appearance.gender === declinerGender) {
+              joinedSameGender.push(candidate);
+            }
+          }
+
+          let replacement: MingleParticipant;
+          if (joinedSameGender.length > 0) {
+            const pickRec = joinedSameGender[Math.floor(Math.random() * joinedSameGender.length)];
+            replacement = toMingleParticipant(pickRec);
+          } else {
+            const npcPool = VALLEY_SINGLES.filter(
+              (n) => n.gender === declinerGender && n.uid !== keptMember.uid,
+            );
+            const npcPick = npcPool[Math.floor(Math.random() * npcPool.length)] || VALLEY_SINGLES[0];
+            replacement = npcToMingleParticipant(npcPick);
+          }
+
+          const loc = { name: pair.locationName, pos: pair.locationPos };
+          const nextMatchId = `mingle_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+          const nextA = declinerIsA ? replacement : keptMember;
+          const nextB = declinerIsA ? keptMember : replacement;
+
+          assignPairAndBroadcast(nextA, nextB, nextMatchId, loc, {
+            aAccepted: declinerIsA ? Boolean(replacement.isNpc) : keptWasAccepted,
+            bAccepted: declinerIsA ? keptWasAccepted : Boolean(replacement.isNpc),
+            replacedGender: declinerGender,
+          });
+
+          const roleLabel = declinerGender === 'male' ? 'Boy' : 'Girl';
+          const keptRoleLabel = keptMember.gender === 'male' ? 'Boy' : 'Girl';
+          io.to(WORLD_ROOM).emit('toast:info', {
+            title: `${roleLabel} Declined — New ${roleLabel} Selected!`,
+            detail: `${keptMember.displayName} (${keptRoleLabel}) stayed · Now matched with ${replacement.displayName}!`,
+          });
+          io.to(WORLD_ROOM).emit('chat:message', {
+            id: `sys_repick_${Date.now()}`,
+            uid: 'system',
+            displayName: 'Mingle Live Screen',
+            photoURL: '',
+            channel: 'system',
+            text: `🔄 ${rec.state.displayName} declined — keeping ${keptMember.displayName} and selecting new ${roleLabel}: ${replacement.displayName}!`,
+            timestamp: Date.now(),
+          });
+          return;
+        }
+
         if (partnerRec && partnerRec.activeMingleMatch?.matchId === match.matchId) {
           partnerRec.activeMingleMatch = null;
-          io.to(partnerRec.socketId).emit('toast:info', {
-            title: 'Match Ended',
-            detail: `${rec.state.displayName} declined this round.`,
-          });
         }
-        if (currentSelectedPair?.matchId === match.matchId) {
-          currentSelectedPair = null;
-        }
+        currentSelectedPair = null;
         broadcastMingleToAll();
         socket.emit('toast:info', { title: 'Match Declined', detail: 'Waiting for the next free auto-select round.' });
         return;
@@ -2640,24 +3536,29 @@ async function startServer(): Promise<void> {
         return;
       }
 
-      // Celebrate FREE Grand Marriage Ceremony at Royal Wedding Mandapam (No Money Needed!)
+      // Celebrate FREE Grand Marriage Ceremony + AUTOMATIC FOOD TO ALL PLAYERS + FREE HONEYMOON!
       if (currentSelectedPair?.matchId === match.matchId) {
         currentSelectedPair.status = 'married';
         currentSelectedPair.memberAAccepted = true;
         currentSelectedPair.memberBAccepted = true;
+        currentSelectedPair.feastServed = true;
       }
+
+      const coupleUids = new Set<string>([uid]);
+      if (partnerRec) coupleUids.add(partnerRec.state.uid);
 
       const finalizeMarriage = (p: ServerPlayerRecord, pPartnerName: string, pPartnerUid: string, pPartnerIg: string) => {
         if (p.activeMingleMatch) {
           p.activeMingleMatch.status = 'married';
           p.activeMingleMatch.myAccepted = true;
           p.activeMingleMatch.partnerAccepted = true;
+          p.activeMingleMatch.feastServed = true;
         }
         p.relationshipStatus = 'married';
         p.partnerName = pPartnerName;
         p.state.relationshipStatus = 'married';
         p.state.partnerName = pPartnerName;
-        p.xp = clamp(p.xp + 200, 0, 1000000);
+        p.xp = clamp(p.xp + 220, 0, 1000000);
         p.level = levelFromXp(p.xp);
         p.state.level = p.level;
 
@@ -2671,10 +3572,11 @@ async function startServer(): Promise<void> {
           greenCoins: p.greenCoins,
           xp: p.xp,
           level: p.level,
+          healthRestore: 100,
           teleportTo: { x: -110, y: 0, z: -14 },
           toast: {
             title: `Just Married: ${p.state.displayName} ♥ ${pPartnerName}!`,
-            detail: '100% FREE Royal Wedding & Honeymoon Unlocked!',
+            detail: 'Wedding Food served to ALL + FREE Lakeside Honeymoon Unlocked!',
             tone: 'rose',
           },
         });
@@ -2685,6 +3587,25 @@ async function startServer(): Promise<void> {
         finalizeMarriage(partnerRec, rec.state.displayName, rec.state.uid, rec.state.instagramId);
       }
 
+      // Serve FREE Wedding Food (Kerala Sadhya & Malabar Biryani) to ALL other online players automatically!
+      for (const guest of playersByUid.values()) {
+        if (coupleUids.has(guest.state.uid)) continue;
+        guest.xp = clamp(guest.xp + 60, 0, 1000000);
+        guest.level = levelFromXp(guest.xp);
+        guest.state.level = guest.level;
+        io.to(guest.socketId).emit('economy:update', {
+          greenCoins: guest.greenCoins,
+          xp: guest.xp,
+          level: guest.level,
+          healthRestore: 100,
+          toast: {
+            title: `Wedding Food Served To All! 🍛`,
+            detail: `${rec.state.displayName} ♥ ${match.partnerName} got married — Free Sadhya & Biryani (+100 HP · +60 XP)!`,
+            tone: 'amber',
+          },
+        });
+      }
+
       broadcastMingleToAll();
 
       io.to(WORLD_ROOM).emit('chat:message', {
@@ -2693,7 +3614,7 @@ async function startServer(): Promise<void> {
         displayName: 'Green Valley Wedding Bell',
         photoURL: '',
         channel: 'system',
-        text: `🎉 Free Grand Marriage Celebration! ${rec.state.displayName} ♥ ${match.partnerName} just got married at the Royal Wedding Mandapam!`,
+        text: `🎉 ${rec.state.displayName} ♥ ${match.partnerName} just got MARRIED! FREE Wedding Sadhya & Biryani food served to EVERY player + FREE Honeymoon unlocked!`,
         timestamp: Date.now(),
       });
     });
@@ -2705,21 +3626,24 @@ async function startServer(): Promise<void> {
       if (currentSelectedPair?.matchId === rec.activeMingleMatch.matchId) {
         currentSelectedPair.feastServed = true;
       }
-      rec.xp = clamp(rec.xp + 120, 0, 1000000);
-      rec.level = levelFromXp(rec.xp);
-      rec.state.level = rec.level;
       broadcastMingleToAll();
-      socket.emit('economy:update', {
-        greenCoins: rec.greenCoins,
-        xp: rec.xp,
-        level: rec.level,
-        healthRestore: 100,
-        toast: {
-          title: 'Free Royal Wedding Feast Served!',
-          detail: 'Complimentary Kerala Sadhya, Biryani, Payasam & Cake (+100 HP · +120 XP)',
-          tone: 'amber',
-        },
-      });
+      // Serve food to ALL online players across Green Valley!
+      for (const p of playersByUid.values()) {
+        p.xp = clamp(p.xp + 80, 0, 1000000);
+        p.level = levelFromXp(p.xp);
+        p.state.level = p.level;
+        io.to(p.socketId).emit('economy:update', {
+          greenCoins: p.greenCoins,
+          xp: p.xp,
+          level: p.level,
+          healthRestore: 100,
+          toast: {
+            title: 'Wedding Feast Served To Everyone! 🍛',
+            detail: `Complimentary Kerala Sadhya, Biryani & Payasam from ${rec.state.displayName}'s Wedding (+100 HP · +80 XP)`,
+            tone: 'amber',
+          },
+        });
+      }
     });
 
     socket.on('mingle:honeymoon', () => {
@@ -2764,6 +3688,428 @@ async function startServer(): Promise<void> {
       });
     });
 
+    // =========================================================================
+    // HASHIM'S VILLA & RIFAD'S VILLA — GRAND WALLED PALACES
+    // =========================================================================
+    socket.on('villa:visitOutside', (payload: Record<string, unknown>) => {
+      const rec = playersByUid.get(uid);
+      if (!rec) return;
+      const villaId = typeof payload?.villaId === 'string' ? payload.villaId : '';
+      const villa = palaceVillasById.get(villaId);
+      if (!villa) return;
+
+      const ownerOrAdmin = isVillaOwner(rec, villa);
+      if (rec.visitedVillaIds.has(villaId) || ownerOrAdmin) {
+        rec.visitedVillaIds.add(villaId);
+        socket.emit('villa:accessUpdate', {
+          villaId,
+          canVisitOutside: true,
+          canEnterInside: ownerOrAdmin || rec.unlockedVillaIds.has(villaId),
+        });
+        socket.emit('toast:info', {
+          title: `Welcome to ${villa.boardName}`,
+          detail: ownerOrAdmin ? 'Owner/Admin VIP Courtyard Entry' : 'Courtyard gate unlocked!',
+        });
+        return;
+      }
+
+      if (rec.greenCoins < villa.visitFee) {
+        socket.emit('action:error', {
+          message: `Need ${villa.visitFee} GC visitor ticket to enter ${villa.boardName} grounds.`,
+        });
+        return;
+      }
+      rec.greenCoins -= villa.visitFee;
+      rec.visitedVillaIds.add(villaId);
+
+      socket.emit('villa:accessUpdate', {
+        villaId,
+        canVisitOutside: true,
+        canEnterInside: false,
+      });
+      socket.emit('economy:update', {
+        greenCoins: rec.greenCoins,
+        xp: rec.xp,
+        level: rec.level,
+        tx: {
+          type: 'spend',
+          amount: villa.visitFee,
+          reason: `Visitor Pass: ${villa.boardName} Grounds`,
+          balanceAfter: rec.greenCoins,
+        },
+        toast: {
+          title: `Entered ${villa.boardName} Grounds!`,
+          detail: `Courtyard open · Entering inside the palace requires the Secret Key.`,
+          tone: 'amber',
+        },
+      });
+    });
+
+    socket.on('villa:unlockHouse', (payload: Record<string, unknown>) => {
+      const rec = playersByUid.get(uid);
+      if (!rec) return;
+      const villaId = typeof payload?.villaId === 'string' ? payload.villaId : '';
+      const rawKey = typeof payload?.key === 'string' ? payload.key.trim() : '';
+      const villa = palaceVillasById.get(villaId);
+      if (!villa) return;
+
+      const ownerOrAdmin = isVillaOwner(rec, villa);
+      if (ownerOrAdmin) {
+        rec.visitedVillaIds.add(villaId);
+        rec.unlockedVillaIds.add(villaId);
+        socket.emit('villa:accessUpdate', { villaId, canVisitOutside: true, canEnterInside: true });
+        socket.emit('toast:info', {
+          title: `Inside ${villa.boardName}`,
+          detail: 'Verified Owner/Admin Palace Access granted!',
+        });
+        return;
+      }
+
+      if (!villa.hasKeySet || !villa.keyHash) {
+        socket.emit('action:error', {
+          message: `The owner (@${villa.ownerUsername}) has not set a public entry key for ${villa.boardName} yet.`,
+        });
+        return;
+      }
+
+      if (!rawKey || !verifySecretScrypt(rawKey, villa.keySalt, villa.keyHash)) {
+        socket.emit('action:error', {
+          message: `Incorrect Secret Key for ${villa.boardName}! Interior access denied.`,
+        });
+        return;
+      }
+
+      rec.visitedVillaIds.add(villaId);
+      rec.unlockedVillaIds.add(villaId);
+      socket.emit('villa:accessUpdate', { villaId, canVisitOutside: true, canEnterInside: true });
+      socket.emit('toast:info', {
+        title: `Palace Doors Unlocked!`,
+        detail: `Welcome inside ${villa.boardName}!`,
+      });
+    });
+
+    socket.on('villa:updateConfig', (payload: Record<string, unknown>) => {
+      const rec = playersByUid.get(uid);
+      if (!rec) return;
+      const villaId = typeof payload?.villaId === 'string' ? payload.villaId : '';
+      const villa = palaceVillasById.get(villaId);
+      if (!villa) return;
+      if (!isVillaOwner(rec, villa)) {
+        socket.emit('action:error', {
+          message: `Only @${villa.ownerUsername} or Admin can rename or change the key of ${villa.boardName}.`,
+        });
+        return;
+      }
+
+      const nextName = typeof payload?.boardName === 'string' ? sanitizeText(payload.boardName, 36) : '';
+      if (nextName.length >= 2) {
+        villa.boardName = nextName;
+      }
+      const nextKey = typeof payload?.newKey === 'string' ? payload.newKey.trim() : '';
+      if (nextKey.length > 0) {
+        if (nextKey.length < 4 || nextKey.length > 24) {
+          socket.emit('action:error', { message: 'Villa secret key must be 4–24 characters.' });
+          return;
+        }
+        villa.keySalt = crypto.randomBytes(16).toString('hex');
+        villa.keyHash = hashSecretScrypt(nextKey, villa.keySalt);
+        villa.hasKeySet = true;
+      }
+
+      io.to(WORLD_ROOM).emit('villa:updated', toPublicVilla(villa));
+      socket.emit('toast:info', {
+        title: `${villa.boardName} Updated!`,
+        detail: nextKey ? 'Signboard & Secret Palace Key saved.' : 'Palace signboard updated live!',
+      });
+    });
+
+    // =========================================================================
+    // PERSONAL SMARTPHONE: PRIVATE 1-ON-1 CALLS & ADMIN TYPIXEL ALERTS
+    // =========================================================================
+    socket.on('phone:call', (payload: Record<string, unknown>) => {
+      const rec = playersByUid.get(uid);
+      if (!rec) return;
+      const targetUid = typeof payload?.targetUid === 'string' ? payload.targetUid : '';
+      const target = targetUid && targetUid !== uid ? playersByUid.get(targetUid) : null;
+      if (!target) {
+        socket.emit('action:error', { message: 'That citizen is not online right now.' });
+        return;
+      }
+      const callId = `call_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`;
+      activePhoneCalls.set(callId, {
+        callId,
+        callerUid: uid,
+        calleeUid: targetUid,
+        status: 'ringing',
+        startedAtMs: Date.now(),
+      });
+      socket.emit('phone:state', {
+        callId,
+        peerUid: targetUid,
+        peerName: target.state.displayName,
+        peerInstagram: target.state.instagramId,
+        status: 'ringing_out',
+      });
+      io.to(target.socketId).emit('phone:state', {
+        callId,
+        peerUid: uid,
+        peerName: rec.state.displayName,
+        peerInstagram: rec.state.instagramId,
+        status: 'ringing_in',
+      });
+    });
+
+    socket.on('phone:accept', (payload: Record<string, unknown>) => {
+      const callId = typeof payload?.callId === 'string' ? payload.callId : '';
+      const call = activePhoneCalls.get(callId);
+      if (!call || call.calleeUid !== uid) return;
+      call.status = 'active';
+      call.startedAtMs = Date.now();
+      const caller = playersByUid.get(call.callerUid);
+      const callee = playersByUid.get(call.calleeUid);
+      if (caller && callee) {
+        io.to(caller.socketId).emit('phone:state', {
+          callId,
+          peerUid: callee.state.uid,
+          peerName: callee.state.displayName,
+          peerInstagram: callee.state.instagramId,
+          status: 'active',
+          startedAtMs: call.startedAtMs,
+        });
+        io.to(callee.socketId).emit('phone:state', {
+          callId,
+          peerUid: caller.state.uid,
+          peerName: caller.state.displayName,
+          peerInstagram: caller.state.instagramId,
+          status: 'active',
+          startedAtMs: call.startedAtMs,
+        });
+      }
+    });
+
+    socket.on('phone:decline', (payload: Record<string, unknown>) => {
+      const callId = typeof payload?.callId === 'string' ? payload.callId : '';
+      const call = activePhoneCalls.get(callId);
+      if (!call) return;
+      if (call.callerUid !== uid && call.calleeUid !== uid) return;
+      activePhoneCalls.delete(callId);
+      const caller = playersByUid.get(call.callerUid);
+      const callee = playersByUid.get(call.calleeUid);
+      if (caller) io.to(caller.socketId).emit('phone:ended', { callId, reason: 'Call declined' });
+      if (callee) io.to(callee.socketId).emit('phone:ended', { callId, reason: 'Call declined' });
+    });
+
+    socket.on('phone:end', (payload: Record<string, unknown>) => {
+      const callId = typeof payload?.callId === 'string' ? payload.callId : '';
+      const call = activePhoneCalls.get(callId);
+      if (!call) return;
+      if (call.callerUid !== uid && call.calleeUid !== uid) return;
+      activePhoneCalls.delete(callId);
+      const caller = playersByUid.get(call.callerUid);
+      const callee = playersByUid.get(call.calleeUid);
+      if (caller) io.to(caller.socketId).emit('phone:ended', { callId, reason: 'Call ended' });
+      if (callee) io.to(callee.socketId).emit('phone:ended', { callId, reason: 'Call ended' });
+    });
+
+    socket.on('admin:publishUpdate', (payload: Record<string, unknown>) => {
+      const rec = playersByUid.get(uid);
+      if (!rec || !rec.isAdmin) {
+        socket.emit('action:error', { message: 'Admin privileges required.' });
+        return;
+      }
+      const title = sanitizeText(payload?.title, 60);
+      const message = sanitizeText(payload?.message, 260);
+      if (title.length < 2 || message.length < 2) {
+        socket.emit('action:error', { message: 'Enter an update headline and message.' });
+        return;
+      }
+      const alert: TypixelUpdateAlert = {
+        id: `upd_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`,
+        title,
+        message,
+        createdAtMs: Date.now(),
+        author: rec.state.displayName,
+      };
+      typixelUpdates.unshift(alert);
+      if (typixelUpdates.length > 25) typixelUpdates.pop();
+      io.to(WORLD_ROOM).emit('typixel:update', alert);
+    });
+
+    // =========================================================================
+    // ADMIN: EXPAND VILLAGE SIZE & MANAGE SHOP SPACE / LOCATION
+    // =========================================================================
+    socket.on('admin:expandVillage', (payload: Record<string, unknown>) => {
+      const rec = playersByUid.get(uid);
+      if (!rec || !rec.isAdmin) {
+        socket.emit('action:error', { message: 'Admin privileges required.' });
+        return;
+      }
+      const requested = Number(payload?.halfSize);
+      if (!Number.isFinite(requested)) return;
+      villageHalfSize = clamp(Math.round(requested), 420, MAX_WORLD_HALF_SIZE);
+      io.to(WORLD_ROOM).emit('village:config', { halfSize: villageHalfSize });
+      io.to(WORLD_ROOM).emit('toast:info', {
+        title: `Village Expanded to ${villageHalfSize * 2}m × ${villageHalfSize * 2}m!`,
+        detail: 'Admin increased Green Valley land area for new homes & shops.',
+      });
+    });
+
+    socket.on('admin:updateShopSpace', (payload: Record<string, unknown>) => {
+      const rec = playersByUid.get(uid);
+      if (!rec || !rec.isAdmin) {
+        socket.emit('action:error', { message: 'Admin privileges required.' });
+        return;
+      }
+      const shopId = typeof payload?.shopId === 'string' ? payload.shopId : '';
+      const shop = customShopsById.get(shopId);
+      if (!shop) {
+        socket.emit('action:error', { message: 'Shop not found.' });
+        return;
+      }
+      const nextTier: ShopSizeTier = VALID_SHOP_TIERS.has(String(payload?.sizeTier) as ShopSizeTier)
+        ? (payload.sizeTier as ShopSizeTier)
+        : shop.sizeTier || 'small';
+      const nextX = typeof payload?.x === 'number' && Number.isFinite(payload.x) ? payload.x : shop.x;
+      const nextZ = typeof payload?.z === 'number' && Number.isFinite(payload.z) ? payload.z : shop.z;
+      const check = isPositionOnRoad(nextX, nextZ, nextTier === 'palace' ? 18 : 13);
+      if (check.onRoad) {
+        socket.emit('action:error', { message: check.reason || 'Cannot move shop onto a road.' });
+        return;
+      }
+      shop.sizeTier = nextTier;
+      shop.x = Number(clamp(nextX, -villageHalfSize + 20, villageHalfSize - 20).toFixed(1));
+      shop.z = Number(clamp(nextZ, -villageHalfSize + 20, villageHalfSize - 20).toFixed(1));
+      shop.y = Number(Math.max(0, groundHeightAt(shop.x, shop.z)).toFixed(2));
+      io.to(WORLD_ROOM).emit('customShop:updated', shop);
+      socket.emit('toast:info', {
+        title: `Updated Shop Space: ${shop.name}`,
+        detail: `Size: ${nextTier.toUpperCase()} at (${Math.round(shop.x)}, ${Math.round(shop.z)})`,
+      });
+    });
+
+    // =========================================================================
+    // VISIBLE HELD ITEMS + PLAYABLE 3D FOOTBALL & VOLLEYBALL + 50+ GAME CENTER
+    // =========================================================================
+    socket.on('player:holdItem', (payload: Record<string, unknown>) => {
+      const rec = playersByUid.get(uid);
+      if (!rec) return;
+      const item = String(payload?.heldItem || 'none') as HeldItemType;
+      if (!VALID_HELD_ITEMS.has(item)) return;
+      const nowHold = Date.now();
+      rec.state.heldItem = item;
+      rec.state.heldItemUntil = item === 'none' ? undefined : nowHold + 15000;
+      const anim: AnimationState = item === 'snack' ? 'eat' : item === 'tea' || item === 'latte' || item === 'juice' ? 'drink' : 'idle';
+      if (anim === 'drink' || anim === 'eat') {
+        rec.state.anim = anim;
+        rec.state.emoteUntil = nowHold + 4000;
+      }
+      io.to(WORLD_ROOM).emit('player:heldItem', {
+        uid,
+        heldItem: item,
+        heldItemUntil: rec.state.heldItemUntil,
+        anim: rec.state.anim,
+      });
+    });
+
+    socket.on('sports:kick', (payload: Record<string, unknown>) => {
+      const rec = playersByUid.get(uid);
+      if (!rec) return;
+      const ballId = payload?.ballId === 'volleyball' ? 'volleyball' : 'football';
+      const ball = sportsBalls[ballId];
+      const dist = Math.hypot(rec.state.x - ball.x, rec.state.z - ball.z);
+      if (dist > 8) return;
+      const dirX = typeof payload?.dirX === 'number' && Number.isFinite(payload.dirX) ? payload.dirX : Math.sin(rec.state.rotY);
+      const dirZ = typeof payload?.dirZ === 'number' && Number.isFinite(payload.dirZ) ? payload.dirZ : Math.cos(rec.state.rotY);
+      const len = Math.hypot(dirX, dirZ) || 1;
+      const power = ballId === 'volleyball' ? 11.5 : 17.5;
+      ball.vx = (dirX / len) * power;
+      ball.vz = (dirZ / len) * power;
+      ball.vy = ballId === 'volleyball' ? 11.2 : 5.4;
+    });
+
+    socket.on('gameCenter:collectCard', () => {
+      const rec = playersByUid.get(uid);
+      if (!rec) return;
+      if (rec.hasGameCenterCard) {
+        socket.emit('toast:info', {
+          title: 'VIP Card Already Collected',
+          detail: 'You already hold the Grand Game Center Entrance Card!',
+        });
+        return;
+      }
+      const dist = Math.hypot(rec.state.x - HIDDEN_CARD_POS.x, rec.state.z - HIDDEN_CARD_POS.z);
+      if (!rec.isAdmin && dist > 14) {
+        socket.emit('action:error', {
+          message: 'Climb all the way to the high-risk cliff summit to pick up the Hidden Entrance Card!',
+        });
+        return;
+      }
+      rec.hasGameCenterCard = true;
+      rec.xp = clamp(rec.xp + 200, 0, 1000000);
+      rec.level = levelFromXp(rec.xp);
+      rec.state.level = rec.level;
+      socket.emit('economy:update', {
+        greenCoins: rec.greenCoins,
+        xp: rec.xp,
+        level: rec.level,
+        hasGameCenterCard: true,
+        toast: {
+          title: 'Collected Hidden VIP Entrance Card!',
+          detail: 'Grand Game Center (50+ Games) is now permanently unlocked at cheap rates!',
+          tone: 'amber',
+        },
+      });
+    });
+
+    socket.on('gameCenter:play', (payload: Record<string, unknown>) => {
+      const rec = playersByUid.get(uid);
+      if (!rec) return;
+      if (!rec.hasGameCenterCard && !rec.isAdmin) {
+        socket.emit('action:error', {
+          message: 'Collect the Hidden VIP Entrance Card from Danger Peak Cliff before playing!',
+        });
+        return;
+      }
+      const gameId = typeof payload?.gameId === 'string' ? payload.gameId : '';
+      const won = payload?.won === true;
+      const game = GAME_CENTER_GAMES.find((g) => g.id === gameId);
+      if (!game) return;
+
+      const fee = rec.isAdmin ? 0 : game.entryFee;
+      if (fee > 0 && rec.greenCoins < fee) {
+        socket.emit('action:error', {
+          message: `Need ${game.entryFee} GC to play ${game.title}.`,
+        });
+        return;
+      }
+      const prize = won ? game.winPrize : 0;
+      rec.greenCoins = clamp(rec.greenCoins - fee + prize, 0, 10000000);
+      const gainXp = won ? 25 : 8;
+      rec.xp = clamp(rec.xp + gainXp, 0, 1000000);
+      rec.level = levelFromXp(rec.xp);
+      rec.state.level = rec.level;
+
+      const net = prize - fee;
+      socket.emit('economy:update', {
+        greenCoins: rec.greenCoins,
+        xp: rec.xp,
+        level: rec.level,
+        tx: {
+          type: net >= 0 ? 'earn' : 'spend',
+          amount: Math.abs(net || fee),
+          reason: won ? `Won ${game.title}` : `Played ${game.title}`,
+          balanceAfter: rec.greenCoins,
+        },
+        toast: {
+          title: won ? `Arcade Win: +${prize} GC!` : `Played ${game.title}`,
+          detail: won
+            ? `Entry: ${fee} GC · Prize: +${prize} GC · +${gainXp} XP`
+            : `Entry: -${fee} GC · Better luck next round!`,
+          tone: won ? 'emerald' : 'sky',
+        },
+      });
+    });
+
     socket.on('disconnect', () => {
       const disconnectedUid = uidBySocketId.get(socket.id);
       uidBySocketId.delete(socket.id);
@@ -2782,6 +4128,19 @@ async function startServer(): Promise<void> {
             io.to(WORLD_ROOM).emit('vehicle:updated', veh);
           }
         }
+        if (publicBus.conductorUid === disconnectedUid) {
+          publicBus.conductorUid = null;
+          publicBus.conductorName = '';
+          publicBus.conductorStartedAtMs = 0;
+          publicBus.conductorEarnedSalary = 0;
+          io.to(WORLD_ROOM).emit('bus:update', publicBus);
+        }
+        const beforePass = publicBus.passengers.length;
+        publicBus.passengers = publicBus.passengers.filter((p) => p.uid !== disconnectedUid);
+        if (publicBus.passengers.length !== beforePass) {
+          io.to(WORLD_ROOM).emit('bus:update', publicBus);
+        }
+
         playersByUid.delete(disconnectedUid);
         mingleJoinedAt.delete(disconnectedUid);
         io.to(WORLD_ROOM).emit('player:left', {
@@ -2793,10 +4152,160 @@ async function startServer(): Promise<void> {
     });
   });
 
-  // Authoritative 20 Hz world snapshot broadcast
+  // Authoritative 20 Hz World Snapshot + FULL-TIME AUTONOMOUS RUNNING KSRTC PUBLIC BUS LOOP
   setInterval(() => {
-    if (playersByUid.size === 0) return;
     const now = Date.now();
+    const dt = Math.min(0.15, Math.max(0.016, (now - busLastTickMs) / 1000));
+    busLastTickMs = now;
+
+    // 1. Move Full-Time Public KSRTC Bus smoothly around Green Valley stops
+    const nextIdx = (busStopIdx + 1) % PUBLIC_BUS_ROUTE_STOPS.length;
+    const targetStop = PUBLIC_BUS_ROUTE_STOPS[nextIdx];
+    if (now < busWaitUntilMs) {
+      publicBus.isAtStop = true;
+      publicBus.speed = 0;
+    } else {
+      publicBus.isAtStop = false;
+      const dx = targetStop.x - publicBus.x;
+      const dz = targetStop.z - publicBus.z;
+      const dist = Math.hypot(dx, dz);
+      const busSpeed = 14.5; // smooth realistic village bus cruising speed
+      if (dist <= busSpeed * dt + 0.6) {
+        publicBus.x = targetStop.x;
+        publicBus.z = targetStop.z;
+        publicBus.y = Math.max(0, groundHeightAt(publicBus.x, publicBus.z));
+        publicBus.speed = 0;
+        publicBus.isAtStop = true;
+        busStopIdx = nextIdx;
+        publicBus.currentStopName = PUBLIC_BUS_ROUTE_STOPS[busStopIdx].name;
+        publicBus.nextStopName = PUBLIC_BUS_ROUTE_STOPS[(busStopIdx + 1) % PUBLIC_BUS_ROUTE_STOPS.length].name;
+        busWaitUntilMs = now + 4000; // 4-second boarding pause at each stop
+      } else {
+        const vx = (dx / dist) * busSpeed;
+        const vz = (dz / dist) * busSpeed;
+        publicBus.x += vx * dt;
+        publicBus.z += vz * dt;
+        publicBus.y = Math.max(0, groundHeightAt(publicBus.x, publicBus.z));
+        publicBus.rotY = Math.atan2(dx, dz);
+        publicBus.speed = busSpeed;
+      }
+    }
+
+    // 2. Accrue Live Time-Based Salary for Active Bus Conductor (paid every 30s + on shift end)
+    if (publicBus.conductorUid && now - busLastSalaryTickMs >= 1000) {
+      const elapsedSec = (now - busLastSalaryTickMs) / 1000;
+      busLastSalaryTickMs = now;
+      publicBus.conductorEarnedSalary += (CONDUCTOR_SALARY_PER_MIN / 60) * elapsedSec;
+      const conductorRec = playersByUid.get(publicBus.conductorUid);
+      if (conductorRec && publicBus.conductorEarnedSalary >= 36) {
+        const pay = Math.floor(publicBus.conductorEarnedSalary);
+        publicBus.conductorEarnedSalary -= pay;
+        conductorRec.greenCoins = clamp(conductorRec.greenCoins + pay, 0, 10000000);
+        conductorRec.xp = clamp(conductorRec.xp + 18, 0, 1000000);
+        conductorRec.level = levelFromXp(conductorRec.xp);
+        conductorRec.state.level = conductorRec.level;
+        io.to(conductorRec.socketId).emit('economy:update', {
+          greenCoins: conductorRec.greenCoins,
+          xp: conductorRec.xp,
+          level: conductorRec.level,
+          tx: {
+            type: 'earn',
+            amount: pay,
+            reason: 'KSRTC Conductor Time Salary',
+            balanceAfter: conductorRec.greenCoins,
+          },
+          toast: {
+            title: `Conductor Salary: +${pay} GC`,
+            detail: 'Paid for your live time on KSRTC Public Express!',
+            tone: 'amber',
+          },
+        });
+      }
+    }
+
+    // 3. Keep Conductor & Boarded Passengers synced to the moving Bus coordinates
+    if (publicBus.conductorUid) {
+      const cRec = playersByUid.get(publicBus.conductorUid);
+      if (cRec) {
+        cRec.state.x = publicBus.x;
+        cRec.state.y = publicBus.y + 0.8;
+        cRec.state.z = publicBus.z;
+        cRec.state.rotY = publicBus.rotY;
+      }
+    }
+    for (const pInfo of publicBus.passengers) {
+      const pRec = playersByUid.get(pInfo.uid);
+      if (pRec) {
+        pRec.state.x = publicBus.x;
+        pRec.state.y = publicBus.y + 0.8;
+        pRec.state.z = publicBus.z;
+        pRec.state.rotY = publicBus.rotY;
+      }
+    }
+
+    // 3b. Authoritative 3D Football & Volleyball Physics
+    const fb = sportsBalls.football;
+    fb.x += fb.vx * dt;
+    fb.z += fb.vz * dt;
+    fb.y += fb.vy * dt;
+    if (fb.y > 0.42) {
+      fb.vy -= 18 * dt;
+    } else {
+      fb.y = 0.42;
+      fb.vy = Math.abs(fb.vy) > 1.2 ? -fb.vy * 0.45 : 0;
+    }
+    fb.vx *= 0.965;
+    fb.vz *= 0.965;
+    // Goal detection on North/South pitch ends
+    const fbRelX = fb.x - FOOTBALL_PITCH_CENTER.x;
+    const fbRelZ = fb.z - FOOTBALL_PITCH_CENTER.z;
+    if (Math.abs(fbRelX) < 5.5 && Math.abs(fbRelZ) > 19.5) {
+      if (fbRelZ > 0) fb.scoreA += 1;
+      else fb.scoreB += 1;
+      fb.x = FOOTBALL_PITCH_CENTER.x;
+      fb.z = FOOTBALL_PITCH_CENTER.z;
+      fb.y = 0.42;
+      fb.vx = 0;
+      fb.vy = 0;
+      fb.vz = 0;
+      io.to(WORLD_ROOM).emit('toast:info', {
+        title: `GOAL!! Score ${fb.scoreA} – ${fb.scoreB}`,
+        detail: 'Valley Sports Complex Football Pitch!',
+      });
+    } else if (Math.abs(fbRelX) > 16 || Math.abs(fbRelZ) > 22) {
+      fb.vx *= -0.6;
+      fb.vz *= -0.6;
+      fb.x = FOOTBALL_PITCH_CENTER.x + clamp(fbRelX, -15.5, 15.5);
+      fb.z = FOOTBALL_PITCH_CENTER.z + clamp(fbRelZ, -21.5, 21.5);
+    }
+
+    const vb = sportsBalls.volleyball;
+    vb.x += vb.vx * dt;
+    vb.z += vb.vz * dt;
+    vb.y += vb.vy * dt;
+    if (vb.y > 0.36) {
+      vb.vy -= 15.5 * dt;
+    } else {
+      vb.y = 0.36;
+      vb.vy = Math.abs(vb.vy) > 1.0 ? -vb.vy * 0.62 : 0;
+    }
+    vb.vx *= 0.975;
+    vb.vz *= 0.975;
+    const vbRelX = vb.x - VOLLEYBALL_COURT_CENTER.x;
+    const vbRelZ = vb.z - VOLLEYBALL_COURT_CENTER.z;
+    // Bounce off center net if too low
+    if (Math.abs(vbRelZ) < 0.6 && vb.y < 2.3) {
+      vb.vz *= -0.7;
+      vb.z = VOLLEYBALL_COURT_CENTER.z + (vbRelZ >= 0 ? 0.7 : -0.7);
+    }
+    if (Math.abs(vbRelX) > 9.5 || Math.abs(vbRelZ) > 12.5) {
+      vb.vx *= -0.65;
+      vb.vz *= -0.65;
+      vb.x = VOLLEYBALL_COURT_CENTER.x + clamp(vbRelX, -9.2, 9.2);
+      vb.z = VOLLEYBALL_COURT_CENTER.z + clamp(vbRelZ, -12.2, 12.2);
+    }
+
+    if (playersByUid.size === 0) return;
     const players: NetworkPlayer[] = [];
     for (const rec of playersByUid.values()) {
       if (rec.state.chatBubbleUntil && now > rec.state.chatBubbleUntil) {
@@ -2806,71 +4315,83 @@ async function startServer(): Promise<void> {
       if (rec.state.emoteUntil && now > rec.state.emoteUntil && !rec.state.vehicleId) {
         rec.state.emoteUntil = undefined;
       }
+      if (rec.state.heldItemUntil && now > rec.state.heldItemUntil) {
+        rec.state.heldItem = 'none';
+        rec.state.heldItemUntil = undefined;
+      }
       players.push(rec.state);
     }
     io.to(WORLD_ROOM).emit('world:snapshot', {
       players,
       vehicles: Array.from(vehiclesById.values()),
+      publicBus,
+      sportsBalls: [fb, vb],
     });
   }, 50);
 
-  // Automatic Hourly Single-to-Mingle Matchmaker & 5-Minute Alarm Scheduler
+  // Automatic Max 5-Minute Single-to-Mingle Matchmaker & 60-Second Alarm Scheduler
   setInterval(() => {
-    if (playersByUid.size === 0) return;
-    const now = new Date();
-    const hourKey = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}-${now.getHours()}`;
-    const mins = now.getMinutes();
+    const now = Date.now();
+    const remainingMs = mingleNextEventAtMs - now;
 
-    // 5-Minute Alarm before every hour (:55 to :59)
-    if (mins === 55 && lastAlarmHourKey !== hourKey) {
-      lastAlarmHourKey = hourKey;
-      currentMingleLocationIdx = (currentMingleLocationIdx + 1) % MINGLE_MEETUP_LOCATIONS.length;
-      const loc = MINGLE_MEETUP_LOCATIONS[currentMingleLocationIdx];
-      const nextAt = getNextHourTimestamp();
-      for (const rec of playersByUid.values()) {
-        if (rec.relationshipStatus === 'single') {
-          io.to(rec.socketId).emit('mingle:alarm', {
-            locationName: loc.name,
-            locationPos: loc.pos,
-            nextEventAtMs: nextAt,
-          });
-        }
+    // 60-Second Warning Alarm before the 5-minute round auto-selects
+    if (remainingMs <= 60 * 1000 && remainingMs > 0 && mingleAlarmSentForRound !== mingleNextEventAtMs) {
+      mingleAlarmSentForRound = mingleNextEventAtMs;
+      const loc = MINGLE_MEETUP_LOCATIONS[currentMingleLocationIdx % MINGLE_MEETUP_LOCATIONS.length];
+      if (playersByUid.size > 0) {
+        io.to(WORLD_ROOM).emit('mingle:alarm', {
+          locationName: loc.name,
+          locationPos: loc.pos,
+          nextEventAtMs: mingleNextEventAtMs,
+        });
       }
     }
 
-    // Top-of-the-hour Automatic Single-to-Mingle Matchmaking (:00) — Auto-selects 2 real joined accounts for FREE!
-    if (mins === 0 && lastMatchHourKey !== hourKey) {
-      lastMatchHourKey = hourKey;
+    // When the 5-minute timer expires -> auto-select 2 joined accounts & reset timer to 5 min!
+    if (remainingMs <= 0) {
+      mingleNextEventAtMs = now + MINGLE_MAX_ROUND_MS;
+      mingleAlarmSentForRound = 0;
+      if (playersByUid.size === 0) return;
+
       const joinedRecords: ServerPlayerRecord[] = [];
       for (const joinedUid of mingleJoinedAt.keys()) {
         const r = playersByUid.get(joinedUid);
         if (r) joinedRecords.push(r);
       }
-      if (joinedRecords.length === 0) return;
+      if (joinedRecords.length === 0) {
+        for (const p of playersByUid.values()) {
+          io.to(p.socketId).emit('mingle:update', buildMingleStateForPlayer(p));
+        }
+        return;
+      }
 
       const shuffled = [...joinedRecords].sort(() => Math.random() - 0.5);
       const loc = MINGLE_MEETUP_LOCATIONS[currentMingleLocationIdx % MINGLE_MEETUP_LOCATIONS.length];
-      const matchId = `mingle_hr_${Date.now()}`;
+      const matchId = `mingle_5m_${now}`;
 
-      let recA: ServerPlayerRecord | null = null;
-      let recB: ServerPlayerRecord | null = null;
+      let partA: MingleParticipant;
+      let partB: MingleParticipant;
       if (shuffled.length >= 2) {
         const men = shuffled.filter((r) => r.state.appearance.gender === 'male');
         const women = shuffled.filter((r) => r.state.appearance.gender === 'female');
         if (men.length > 0 && women.length > 0) {
-          recA = men[0];
-          recB = women[0];
+          partA = toMingleParticipant(men[0]);
+          partB = toMingleParticipant(women[0]);
         } else {
-          recA = shuffled[0];
-          recB = shuffled[1];
+          partA = toMingleParticipant(shuffled[0]);
+          partB = toMingleParticipant(shuffled[1]);
         }
       } else {
-        recA = shuffled[0];
+        partA = toMingleParticipant(shuffled[0]);
+        const wanted = partA.gender === 'male' ? 'female' : 'male';
+        const pool = VALLEY_SINGLES.filter((n) => n.gender === wanted);
+        const pick = pool[Math.floor(Math.random() * pool.length)] || VALLEY_SINGLES[0];
+        partB = npcToMingleParticipant(pick);
       }
 
-      if (recA && recB) {
-        const partA = toMingleParticipant(recA);
-        const partB = toMingleParticipant(recB);
+      const recA = !partA.isNpc ? playersByUid.get(partA.uid) : null;
+      const recB = !partB.isNpc ? playersByUid.get(partB.uid) : null;
+      if (recA) {
         recA.activeMingleMatch = {
           matchId,
           partnerUid: partB.uid,
@@ -2880,11 +4401,13 @@ async function startServer(): Promise<void> {
           partnerAppearance: partB.appearance,
           partnerAge: partB.age,
           partnerGender: partB.gender,
-          isNpcPartner: false,
+          isNpcPartner: Boolean(partB.isNpc),
           myAccepted: false,
-          partnerAccepted: false,
+          partnerAccepted: Boolean(partB.isNpc),
           status: 'proposed',
         };
+      }
+      if (recB) {
         recB.activeMingleMatch = {
           matchId,
           partnerUid: partA.uid,
@@ -2894,70 +4417,32 @@ async function startServer(): Promise<void> {
           partnerAppearance: partA.appearance,
           partnerAge: partA.age,
           partnerGender: partA.gender,
-          isNpcPartner: false,
+          isNpcPartner: Boolean(partA.isNpc),
           myAccepted: false,
-          partnerAccepted: false,
+          partnerAccepted: Boolean(partA.isNpc),
           status: 'proposed',
         };
-        currentSelectedPair = {
-          matchId,
-          memberA: partA,
-          memberB: partB,
-          selectedAt: Date.now(),
-          locationName: loc.name,
-          locationPos: loc.pos,
-          status: 'proposed',
-          memberAAccepted: false,
-          memberBAccepted: false,
-        };
-        for (const p of playersByUid.values()) {
-          io.to(p.socketId).emit('mingle:update', buildMingleStateForPlayer(p));
-        }
-        io.to(WORLD_ROOM).emit('toast:info', {
-          title: 'Hourly Auto-Select (FREE)!',
-          detail: `${partA.displayName} ♥ ${partB.displayName} selected at ${loc.name}!`,
-        });
-      } else if (recA) {
-        const wanted = recA.state.appearance.gender === 'male' ? 'female' : 'male';
-        const pool = VALLEY_SINGLES.filter((n) => n.gender === wanted);
-        const pick = pool[Math.floor(Math.random() * pool.length)] || VALLEY_SINGLES[0];
-        const partA = toMingleParticipant(recA);
-        const partB = npcToMingleParticipant(pick);
-        recA.activeMingleMatch = {
-          matchId,
-          partnerUid: partB.uid,
-          partnerName: partB.displayName,
-          partnerInstagram: partB.instagramId,
-          partnerPhotoURL: partB.photoURL,
-          partnerAppearance: partB.appearance,
-          partnerAge: partB.age,
-          partnerGender: partB.gender,
-          isNpcPartner: true,
-          myAccepted: false,
-          partnerAccepted: true,
-          status: 'proposed',
-        };
-        currentSelectedPair = {
-          matchId,
-          memberA: partA,
-          memberB: partB,
-          selectedAt: Date.now(),
-          locationName: loc.name,
-          locationPos: loc.pos,
-          status: 'proposed',
-          memberAAccepted: false,
-          memberBAccepted: true,
-        };
-        for (const p of playersByUid.values()) {
-          io.to(p.socketId).emit('mingle:update', buildMingleStateForPlayer(p));
-        }
-        io.to(recA.socketId).emit('toast:info', {
-          title: 'Hourly Free Single-to-Mingle Match!',
-          detail: `${partA.displayName} ♥ ${partB.displayName} at ${loc.name}!`,
-        });
       }
+      currentSelectedPair = {
+        matchId,
+        memberA: partA,
+        memberB: partB,
+        selectedAt: now,
+        locationName: loc.name,
+        locationPos: loc.pos,
+        status: 'proposed',
+        memberAAccepted: Boolean(partA.isNpc),
+        memberBAccepted: Boolean(partB.isNpc),
+      };
+      for (const p of playersByUid.values()) {
+        io.to(p.socketId).emit('mingle:update', buildMingleStateForPlayer(p));
+      }
+      io.to(WORLD_ROOM).emit('toast:info', {
+        title: '5-Min Auto-Select Complete (FREE)!',
+        detail: `${partA.displayName} ♥ ${partB.displayName} revealed on the 3D Mingle Screen!`,
+      });
     }
-  }, 5000);
+  }, 2000);
 
   // Mount Vite dev middleware or production static files
   if (process.env.NODE_ENV !== 'production') {

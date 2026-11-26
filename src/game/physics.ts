@@ -15,6 +15,11 @@ export class WorldPhysics {
   private rapierWorld: RAPIER.World | null = null;
   private rapierReady = false;
   public colliders: BoxCollider[] = [];
+  public worldHalfSize = WORLD_HALF_SIZE;
+
+  setWorldHalfSize(halfSize: number): void {
+    this.worldHalfSize = Math.max(400, Math.min(960, halfSize));
+  }
 
   async init(): Promise<void> {
     try {
@@ -81,7 +86,7 @@ export class WorldPhysics {
   }
 
   /**
-   * Resolves horizontal circle-vs-AABB collisions and world perimeter bounds,
+   * Resolves horizontal circle-vs-AABB collisions and dynamic world perimeter bounds,
    * returning collision-corrected (x, z) plus whether a wall hit occurred.
    */
   resolveHorizontal(
@@ -91,8 +96,9 @@ export class WorldPhysics {
     radius: number,
     actorHeight: number,
   ): { x: number; z: number; collided: boolean } {
-    let rx = Math.max(-WORLD_HALF_SIZE + 4, Math.min(WORLD_HALF_SIZE - 4, x));
-    let rz = Math.max(-WORLD_HALF_SIZE + 4, Math.min(WORLD_HALF_SIZE - 4, z));
+    const bound = this.worldHalfSize - 4;
+    let rx = Math.max(-bound, Math.min(bound, x));
+    let rz = Math.max(-bound, Math.min(bound, z));
     let collided = rx !== x || rz !== z;
 
     for (let i = 0; i < this.colliders.length; i++) {

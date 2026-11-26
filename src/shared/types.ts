@@ -29,11 +29,23 @@ export type AnimationState =
   | 'dance'
   | 'cheer'
   | 'sit'
-  | 'clap';
+  | 'clap'
+  | 'drink'
+  | 'eat';
 export type EmoteType = 'wave' | 'dance' | 'cheer' | 'sit' | 'clap';
+export type HeldItemType =
+  | 'none'
+  | 'tea'
+  | 'latte'
+  | 'juice'
+  | 'snack'
+  | 'football'
+  | 'volleyball'
+  | 'cricket_bat';
 export type InteriorTheme = 'modern' | 'cozy' | 'minimal' | 'luxury';
 export type GardenStyle = 'flowers' | 'zen' | 'poolside' | 'orchard';
 export type CustomHomeStyle = 'cabin' | 'modern' | 'villa' | 'manor';
+export type ShopSizeTier = 'small' | 'medium' | 'large' | 'palace';
 export type CustomShopType = 'tea_stall' | 'juice_bar' | 'bakery' | 'boutique' | 'tech_shop';
 export type RelationshipStatus = 'single' | 'mingle' | 'married';
 export type LocationCategory = 'favorite' | 'home' | 'hangout' | 'tea' | 'event';
@@ -92,6 +104,8 @@ export interface PlayerProfile {
   totalDailyLogins: number;
   followedOfficial: boolean;
   followedStudio: boolean;
+  muscleLevel: number;
+  hasGameCenterCard: boolean;
   customLocations: CustomLocationPin[];
   appearance: CharacterAppearance;
   greenCoins: number;
@@ -125,6 +139,9 @@ export interface NetworkPlayer {
   age?: number;
   relationshipStatus?: RelationshipStatus;
   partnerName?: string;
+  muscleLevel?: number;
+  heldItem?: HeldItemType;
+  heldItemUntil?: number;
   appearance: CharacterAppearance;
   x: number;
   y: number;
@@ -170,6 +187,48 @@ export interface VehicleState {
   buyPrice: number;
 }
 
+export interface PublicBusPassenger {
+  uid: string;
+  displayName: string;
+  instagramId: string;
+  paidFare: boolean;
+  hasTicket: boolean;
+  ticketCode: string;
+  boardedAtMs: number;
+}
+
+export interface PublicBusState {
+  id: string;
+  name: string;
+  x: number;
+  y: number;
+  z: number;
+  rotY: number;
+  speed: number;
+  fare: number;
+  isAtStop: boolean;
+  currentStopName: string;
+  nextStopName: string;
+  conductorUid: string | null;
+  conductorName: string;
+  conductorStartedAtMs: number;
+  conductorEarnedSalary: number;
+  conductorFaresCollected: number;
+  conductorTicketsIssued: number;
+  passengers: PublicBusPassenger[];
+}
+
+export interface PublicAdDef {
+  adId: string;
+  title: string;
+  subtitle: string;
+  instagramHandle: string;
+  accentColor: string;
+  ownerUid: string;
+  ownerName: string;
+  createdAtMs: number;
+}
+
 export interface PropertyDef {
   id: string;
   name: string;
@@ -204,6 +263,8 @@ export interface CustomHomeDef {
   wallColor: string;
   roofColor: string;
   hasPool: boolean;
+  hasGarden?: boolean;
+  hasAc?: boolean;
   interiorTheme: InteriorTheme;
   gardenStyle: GardenStyle;
   x: number;
@@ -213,6 +274,7 @@ export interface CustomHomeDef {
 
 export interface CustomHomePlan {
   style: CustomHomeStyle;
+  tierLabel: 'Small' | 'Medium' | 'Large' | 'Palace';
   label: string;
   price: number;
   size: Vec3;
@@ -224,10 +286,14 @@ export interface CustomShopDef {
   shopId: string;
   name: string;
   shopType: CustomShopType;
+  sizeTier?: ShopSizeTier;
+  hasSeating?: boolean;
+  hasAc?: boolean;
   ownerUid: string;
   ownerName: string;
   ownerInstagram: string;
   awningColor: string;
+  ownerKeyHash?: string;
   x: number;
   y: number;
   z: number;
@@ -240,7 +306,95 @@ export interface CustomShopPlan {
   price: number;
   defaultAwning: string;
   description: string;
-  menuItems: { id: string; name: string; price: number; healthRestore: number; xp: number }[];
+  menuItems: {
+    id: string;
+    name: string;
+    price: number;
+    healthRestore: number;
+    xp: number;
+    heldItem?: HeldItemType;
+  }[];
+}
+
+export interface PalaceVillaDef {
+  villaId: 'hashim_villa' | 'rifad_villa';
+  boardName: string;
+  ownerUsername: string;
+  ownerDisplayName: string;
+  visitFee: number;
+  hasKeySet: boolean;
+  x: number;
+  z: number;
+  gatePos: Vec3;
+  doorPos: Vec3;
+  wallSize: { w: number; d: number };
+  accentColor: string;
+}
+
+export interface TypixelUpdateAlert {
+  id: string;
+  title: string;
+  message: string;
+  createdAtMs: number;
+  author: string;
+}
+
+export interface PhoneCallState {
+  callId: string;
+  peerUid: string;
+  peerName: string;
+  peerInstagram?: string;
+  status: 'ringing_out' | 'ringing_in' | 'active';
+  startedAtMs?: number;
+}
+
+export interface SportsBallState {
+  id: 'football' | 'volleyball';
+  x: number;
+  y: number;
+  z: number;
+  vx: number;
+  vy: number;
+  vz: number;
+  scoreA: number;
+  scoreB: number;
+}
+
+export interface VillageConfigState {
+  halfSize: number;
+}
+
+export type MiniGameEngine =
+  | 'reflex'
+  | 'math'
+  | 'memory'
+  | 'clicker'
+  | 'guess'
+  | 'trivia'
+  | 'rps'
+  | 'timing'
+  | 'word'
+  | 'dice';
+
+export interface MiniGameDef {
+  id: string;
+  title: string;
+  category:
+    | 'Arcade'
+    | 'Reflex'
+    | 'Math'
+    | 'Memory'
+    | 'Trivia'
+    | 'Sports'
+    | 'Word'
+    | 'Strategy'
+    | 'Dice & Cards'
+    | 'Tycoon';
+  engine: MiniGameEngine;
+  entryFee: number;
+  winPrize: number;
+  tagline: string;
+  accent: string;
 }
 
 export interface ActiveBuildingDef {
@@ -255,10 +409,14 @@ export interface ActiveBuildingDef {
     | 'library'
     | 'cinema'
     | 'gym'
+    | 'park'
+    | 'ad_center'
     | 'ksrtc_depot'
     | 'airport'
     | 'wedding_hall'
-    | 'honeymoon_resort';
+    | 'honeymoon_resort'
+    | 'government'
+    | 'game_center';
   doorPosition: Vec3;
   subtitle: string;
   description: string;
@@ -271,9 +429,11 @@ export interface ActiveBuildingDef {
     rewardCoins?: number;
     rewardXp?: number;
     healthRestore?: number;
+    muscleGain?: number;
+    heldItem?: HeldItemType;
     teleportTo?: Vec3;
     teleportLabel?: string;
-    openPanel?: 'inventory' | 'wallet' | 'mingle' | 'vehicles';
+    openPanel?: 'inventory' | 'wallet' | 'mingle' | 'vehicles' | 'ads' | 'transit' | 'game_center';
   }[];
 }
 
@@ -311,11 +471,14 @@ export interface MingleSelectedPair {
   memberAAccepted: boolean;
   memberBAccepted: boolean;
   feastServed?: boolean;
+  lastReplacedGender?: Gender;
 }
 
 export interface MingleEventState {
   nextEventAtMs: number;
+  maxRoundDurationMs?: number;
   alarmActive: boolean;
+  selectingNow?: boolean;
   locationName: string;
   locationPos: Vec3;
   isJoined?: boolean;
@@ -442,6 +605,7 @@ export interface InteractablePrompt {
   id: string;
   type:
     | 'vehicle'
+    | 'public_bus'
     | 'property'
     | 'custom_home'
     | 'custom_shop'
@@ -451,7 +615,10 @@ export interface InteractablePrompt {
     | 'npc'
     | 'mission'
     | 'work'
-    | 'shop';
+    | 'shop'
+    | 'villa'
+    | 'hidden_card'
+    | 'sports_ball';
   label: string;
   sublabel?: string;
   targetId: string;

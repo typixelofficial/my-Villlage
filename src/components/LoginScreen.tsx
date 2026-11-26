@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   CheckCircle2,
   ExternalLink,
@@ -7,16 +7,12 @@ import {
   KeyRound,
   LogIn,
   Mail,
-  SearchCheck,
-  Send,
-  ShieldAlert,
+  Shield,
   ShieldCheck,
   UserPlus,
   X,
-  XCircle,
 } from 'lucide-react';
 import {
-  checkVerifiedFollowerInFirestore,
   sanitizeInstagramId,
   sendPasswordReset,
   signInWithEmail,
@@ -27,21 +23,13 @@ import { SHOWCASE_ADS } from '../shared/worldData.ts';
 import { useGameStore } from '../store/gameStore.ts';
 
 const HERO_IMAGE = '/src/assets/images/green_valley_hero_1795609556675.jpg';
-const IG_EMAIL_MAP_KEY = 'typixel_ig_email_map_v1';
+const IG_EMAIL_MAP_KEY = 'typixel_ig_email_map_v2';
 
-type AuthTab = 'signin' | 'signup' | 'forgot';
+type AuthTab = 'signin' | 'signup' | 'forgot' | 'admin';
 
-interface FollowVerificationResult {
-  instagramId: string;
-  followsOfficial: boolean;
-  followsStudio: boolean;
-  verified: boolean;
-  checkedAt: number;
-}
-
-function rememberIgEmail(igUsername: string, gmail: string): void {
+function rememberIgEmail(igUsername: string, email: string): void {
   const cleanIg = sanitizeInstagramId(igUsername).toLowerCase();
-  const cleanEmail = gmail.trim().toLowerCase();
+  const cleanEmail = email.trim().toLowerCase();
   if (!cleanIg || !cleanEmail) return;
   try {
     const raw = localStorage.getItem(IG_EMAIL_MAP_KEY);
@@ -49,25 +37,31 @@ function rememberIgEmail(igUsername: string, gmail: string): void {
     map[cleanIg] = cleanEmail;
     localStorage.setItem(IG_EMAIL_MAP_KEY, JSON.stringify(map));
   } catch {
-    // ignore
+    // ignore storage errors
   }
 }
 
-function lookupEmailByIg(igOrEmail: string): string {
-  const val = igOrEmail.trim();
-  if (val.includes('@') && val.indexOf('@') > 0) return val;
+function resolveLoginEmail(rawInput: string): { email: string; cleanHandle: string } {
+  const val = rawInput.trim();
+  if (val.includes('@') && val.indexOf('@') > 0 && val.includes('.')) {
+    return { email: val.toLowerCase(), cleanHandle: '' };
+  }
   const cleanIg = sanitizeInstagramId(val).toLowerCase();
+  if (!cleanIg) return { email: '', cleanHandle: '' };
   try {
     const raw = localStorage.getItem(IG_EMAIL_MAP_KEY);
     const map = raw ? (JSON.parse(raw) as Record<string, string>) : {};
-    return map[cleanIg] || '';
+    if (map[cleanIg]) return { email: map[cleanIg], cleanHandle: cleanIg };
   } catch {
-    return '';
+    // ignore
   }
+  return { email: `${cleanIg}@village.typixel.app`, cleanHandle: cleanIg };
 }
 
 export function LoginScreen() {
   const setPendingInstagramDraft = useGameStore((s) => s.setPendingInstagramDraft);
+  const setAdminBearerToken = useGameStore((s) => s.setAdminBearerToken);
+  const setIsAdmin = useGameStore((s) => s.setIsAdmin);
 
   const [tab, setTab] = useState<AuthTab>('signin');
   const [loading, setLoading] = useState(false);
@@ -77,118 +71,80 @@ export function LoginScreen() {
   const [heroLoaded, setHeroLoaded] = useState(true);
   const [adIndex, setAdIndex] = useState(0);
 
-  // Real Server + Firestore Follower Verification State (NO click-to-unlock!)
-  const [verifyIgInput, setVerifyIgInput] = useState('');
-  const [verifyingFollow, setVerifyingFollow] = useState(false);
-  const [verifyResult, setVerifyResult] = useState<FollowVerificationResult | null>(null);
-  const [requestingReview, setRequestingReview] = useState(false);
-  const [reviewRequestedFor, setReviewRequestedFor] = useState<string | null>(null);
+  // Simple Direct Instagram Open + Return Monitor (never gets stuck on "Checking...")
+  const [visitedOfficial, setVisitedOfficial] = useState(false);
+  const [visitedStudio, setVisitedStudio] = useState(false);
+  const [confirmedFollowed, setConfirmedFollowed] = useState(false);
+  const pendingVisitRef = useRef<'official' | 'studio' | null>(null);
 
-  const cleanInputIg = sanitizeInstagramId(verifyIgInput).toLowerCase();
-  const isCurrentIdVerified = Boolean(
-    verifyResult &&
-      verifyResult.verified &&
-      verifyResult.instagramId === cleanInputIg &&
-      cleanInputIg.length >= 2,
-  );
+  const isUnlocked = (visitedOfficial && visitedStudio) || confirmedFollowed;
 
-  // Auth Form Fields
+  // Citizen Auth Form Fields
   const [igOrEmail, setIgOrEmail] = useState('');
   const [gmail, setGmail] = useState('');
   const [instagramId, setInstagramId] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [password, setPassword] = useState('');
 
+  // Admin Login Form Fields
+  const [adminConfigured, setAdminConfigured] = useState<boolean | null>(null);
+  const [adminUsername, setAdminUsername] = useState('typixelofficial');
+  const [adminPassword, setAdminPassword] = useState('');
+  const [adminConfirmPassword, setAdminConfirmPassword] = useState('');
+
+  // Rotating Typixel showcase ads
   useEffect(() => {
     const timer = window.setInterval(() => {
       setAdIndex((prev) => (prev + 1) % SHOWCASE_ADS.length);
-    }, 4200);
+    }, 4500);
     return () => window.clearInterval(timer);
   }, []);
 
-  const handleVerifyFollowers = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    setError(null);
-    setInfoMsg(null);
-    const cleanIg = sanitizeInstagramId(verifyIgInput).toLowerCase();
-    if (cleanIg.length < 2) {
-      setError('Enter your Instagram username (2–30 characters) to verify your follow status.');
-      return;
-    }
-
-    setVerifyingFollow(true);
-    try {
-      const [apiResp, firestoreRec] = await Promise.all([
-        fetch('/api/instagram/verify-follow', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ instagramId: cleanIg }),
-        })
-          .then(async (r) => (r.ok ? ((await r.json()) as Partial<FollowVerificationResult>) : null))
-          .catch(() => null),
-        checkVerifiedFollowerInFirestore(cleanIg),
-      ]);
-
-      const followsOfficial = Boolean(
-        apiResp?.followsOfficial || firestoreRec?.followsOfficial,
-      );
-      const followsStudio = Boolean(apiResp?.followsStudio || firestoreRec?.followsStudio);
-      const verified = followsOfficial && followsStudio;
-
-      setVerifyResult({
-        instagramId: cleanIg,
-        followsOfficial,
-        followsStudio,
-        verified,
-        checkedAt: Date.now(),
-      });
-
-      if (verified) {
-        setInstagramId(cleanIg);
-        setPendingInstagramDraft(cleanIg);
-        setInfoMsg(
-          `Verified! @${cleanIg} follows both @typixelofficial and @typixel.studio. Login is now unlocked.`,
-        );
-      } else {
-        const missing: string[] = [];
-        if (!followsOfficial) missing.push('@typixelofficial');
-        if (!followsStudio) missing.push('@typixel.studio');
-        setError(
-          `@${cleanIg} was NOT found in the followers of ${missing.join(' and ')}. Follow both pages on Instagram, then request verification or retry after follower sync.`,
-        );
+  // Return-from-Instagram Monitor: detects focus/visibility return after visiting Instagram page
+  useEffect(() => {
+    const markReturned = () => {
+      if (pendingVisitRef.current === 'official') {
+        setVisitedOfficial(true);
+        pendingVisitRef.current = null;
+      } else if (pendingVisitRef.current === 'studio') {
+        setVisitedStudio(true);
+        pendingVisitRef.current = null;
       }
-    } catch {
-      setError('Could not complete follower check right now. Please try again.');
-    } finally {
-      setVerifyingFollow(false);
-    }
-  };
+    };
+    const onVisChange = () => {
+      if (document.visibilityState === 'visible') markReturned();
+    };
+    window.addEventListener('focus', markReturned);
+    document.addEventListener('visibilitychange', onVisChange);
+    return () => {
+      window.removeEventListener('focus', markReturned);
+      document.removeEventListener('visibilitychange', onVisChange);
+    };
+  }, []);
 
-  const handleRequestVerification = async () => {
-    const cleanIg = sanitizeInstagramId(verifyIgInput).toLowerCase();
-    if (cleanIg.length < 2) return;
-    setRequestingReview(true);
-    setError(null);
-    try {
-      const resp = await fetch('/api/instagram/request-verify', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ instagramId: cleanIg }),
-      });
-      if (!resp.ok) {
-        const data = (await resp.json().catch(() => ({}))) as { error?: string };
-        setError(data.error || 'Could not submit verification request.');
-        return;
-      }
-      setReviewRequestedFor(cleanIg);
-      setInfoMsg(
-        `Verification request sent for @${cleanIg}! Once the admin verifies your follow on @typixelofficial and @typixel.studio, click "Check Followers" again.`,
-      );
-    } catch {
-      setError('Could not submit verification request right now.');
-    } finally {
-      setRequestingReview(false);
-    }
+  // Load admin server configuration status when Admin tab opens
+  useEffect(() => {
+    if (tab !== 'admin' || adminConfigured !== null) return;
+    fetch('/api/admin/status')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { configured?: boolean; expectedUsername?: string } | null) => {
+        if (data) {
+          setAdminConfigured(Boolean(data.configured));
+          if (data.expectedUsername) setAdminUsername(data.expectedUsername);
+        } else {
+          setAdminConfigured(true);
+        }
+      })
+      .catch(() => setAdminConfigured(true));
+  }, [tab, adminConfigured]);
+
+  const handleOpenInstagram = (which: 'official' | 'studio') => {
+    pendingVisitRef.current = which;
+    // Also mark visited immediately after short delay in case browser keeps focus in split/iframe mode
+    window.setTimeout(() => {
+      if (which === 'official') setVisitedOfficial(true);
+      else setVisitedStudio(true);
+    }, 1200);
   };
 
   const formatFirebaseError = (err: unknown): string => {
@@ -200,28 +156,28 @@ export function LoginScreen() {
       return 'Popup blocked by browser. Allow popups for this site and try again.';
     }
     if (code === 'auth/operation-not-allowed') {
-      return 'Email/Password sign-in is not yet enabled in Firebase Console (Authentication → Sign-in method → Email/Password). Use "Continue with Gmail (Google)" right away!';
+      return 'Email/Password sign-in is not yet enabled in Firebase Console. Use "Continue with Gmail (Google)" instead!';
     }
     if (code === 'auth/email-already-in-use') {
-      return 'This Gmail is already registered. Switch to Sign In instead.';
+      return 'This username or Gmail is already registered. Switch to Sign In instead.';
     }
     if (
       code === 'auth/invalid-credential' ||
       code === 'auth/wrong-password' ||
       code === 'auth/user-not-found'
     ) {
-      return 'Incorrect credentials. Check your Gmail / Instagram username and game password, or use Forgot Password.';
+      return 'Incorrect username/Gmail or password. If this is your first time (e.g. __hashim_mhd_ or _rifadeeyy), switch to Sign Up to set your password!';
     }
     if (code === 'auth/weak-password') {
-      return 'Game password must be at least 6 characters.';
+      return 'Password must be at least 6 characters.';
     }
     return err instanceof Error ? err.message : 'Unable to complete sign-in.';
   };
 
-  const ensureFollowVerified = (): boolean => {
-    if (!isCurrentIdVerified) {
+  const ensureFollowChecked = (): boolean => {
+    if (!isUnlocked) {
       setError(
-        'Enter your Instagram username in Step 1 and click "Check Followers" to confirm you follow both @typixelofficial and @typixel.studio.',
+        'Tap both @typixelofficial and @typixel.studio above to open Instagram and follow, or check the follow confirmation box.',
       );
       return false;
     }
@@ -231,10 +187,11 @@ export function LoginScreen() {
   const handleGoogleSignIn = async () => {
     setError(null);
     setInfoMsg(null);
-    if (!ensureFollowVerified()) return;
+    if (tab !== 'admin' && !ensureFollowChecked()) return;
     setLoading(true);
     try {
-      if (cleanInputIg) setPendingInstagramDraft(cleanInputIg);
+      const draft = sanitizeInstagramId(instagramId || igOrEmail);
+      if (draft) setPendingInstagramDraft(draft);
       await signInWithGoogle();
     } catch (err: unknown) {
       setError(formatFirebaseError(err));
@@ -246,22 +203,20 @@ export function LoginScreen() {
     e.preventDefault();
     setError(null);
     setInfoMsg(null);
-    if (!ensureFollowVerified()) return;
-    const resolvedEmail = lookupEmailByIg(igOrEmail);
-    if (!resolvedEmail) {
-      setError(
-        'Enter your Gmail address (or an Instagram username previously signed up on this device).',
-      );
+    if (!ensureFollowChecked()) return;
+    const { email, cleanHandle } = resolveLoginEmail(igOrEmail);
+    if (!email) {
+      setError('Enter your Instagram username (e.g. __hashim_mhd_ or _rifadeeyy) or Gmail.');
       return;
     }
     if (password.length < 6) {
-      setError('Enter your game password (minimum 6 characters).');
+      setError('Enter your password (minimum 6 characters).');
       return;
     }
     setLoading(true);
     try {
-      setPendingInstagramDraft(cleanInputIg);
-      await signInWithEmail(resolvedEmail, password);
+      if (cleanHandle) setPendingInstagramDraft(cleanHandle);
+      await signInWithEmail(email, password);
     } catch (err: unknown) {
       setError(formatFirebaseError(err));
       setLoading(false);
@@ -272,26 +227,27 @@ export function LoginScreen() {
     e.preventDefault();
     setError(null);
     setInfoMsg(null);
-    if (!ensureFollowVerified()) return;
-    const cleanIg = cleanInputIg || sanitizeInstagramId(instagramId).toLowerCase();
+    if (!ensureFollowChecked()) return;
+    const cleanIg = sanitizeInstagramId(instagramId).toLowerCase();
     if (cleanIg.length < 2) {
-      setError('A verified Instagram username is required to create a Green Valley account.');
-      return;
-    }
-    if (!gmail.trim().includes('@')) {
-      setError('Enter your Gmail address for account security & password recovery.');
+      setError('Enter your Instagram username (e.g. __hashim_mhd_ or _rifadeeyy).');
       return;
     }
     if (password.length < 6) {
-      setError('Create a game password of at least 6 characters.');
+      setError('Create a Green Valley password of at least 6 characters.');
       return;
     }
+    const targetEmail =
+      gmail.trim().includes('@') && gmail.trim().includes('.')
+        ? gmail.trim().toLowerCase()
+        : `${cleanIg}@village.typixel.app`;
+
     setLoading(true);
     try {
       const finalName = displayName.trim().length >= 2 ? displayName.trim() : cleanIg;
-      rememberIgEmail(cleanIg, gmail);
+      rememberIgEmail(cleanIg, targetEmail);
       setPendingInstagramDraft(cleanIg);
-      await signUpWithEmail(gmail, password, finalName);
+      await signUpWithEmail(targetEmail, password, finalName);
     } catch (err: unknown) {
       setError(formatFirebaseError(err));
       setLoading(false);
@@ -302,17 +258,15 @@ export function LoginScreen() {
     e.preventDefault();
     setError(null);
     setInfoMsg(null);
-    const targetEmail = lookupEmailByIg(gmail || igOrEmail);
-    if (!targetEmail || !targetEmail.includes('@')) {
-      setError('Enter your registered Gmail address to receive a password reset link.');
+    const { email } = resolveLoginEmail(gmail || igOrEmail);
+    if (!email || !email.includes('@') || email.endsWith('@village.typixel.app')) {
+      setError('Enter the real Gmail address linked to your account to receive a reset link.');
       return;
     }
     setLoading(true);
     try {
-      await sendPasswordReset(targetEmail);
-      setInfoMsg(
-        `Password reset link sent to ${targetEmail}! Check your Gmail inbox or spam folder.`,
-      );
+      await sendPasswordReset(email);
+      setInfoMsg(`Password reset link sent to ${email}! Check your Gmail inbox or spam folder.`);
     } catch (err: unknown) {
       setError(formatFirebaseError(err));
     } finally {
@@ -320,8 +274,69 @@ export function LoginScreen() {
     }
   };
 
+  const handleAdminSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setInfoMsg(null);
+    const cleanAdminUser = sanitizeInstagramId(adminUsername).toLowerCase() || 'typixelofficial';
+    if (adminPassword.length < 6) {
+      setError('Admin password must be at least 6 characters.');
+      return;
+    }
+    if (adminConfigured === false && adminPassword !== adminConfirmPassword) {
+      setError('Admin passwords do not match.');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const endpoint = adminConfigured === false ? '/api/admin/claim' : '/api/admin/login';
+      const resp = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: cleanAdminUser, password: adminPassword }),
+      });
+      const data = (await resp.json().catch(() => ({}))) as {
+        adminToken?: string;
+        error?: string;
+      };
+      if (!resp.ok || !data.adminToken) {
+        setError(data.error || 'Admin authentication failed.');
+        setLoading(false);
+        return;
+      }
+
+      // Store verified admin bearer token strictly in memory (Zustand, NEVER localStorage)
+      setAdminBearerToken(data.adminToken);
+      setIsAdmin(true);
+      setPendingInstagramDraft(cleanAdminUser);
+
+      // Sign in or auto-provision the paired Firebase session for real-time 3D world access
+      const adminEmail = `${cleanAdminUser}@village.typixel.app`;
+      try {
+        await signInWithEmail(adminEmail, adminPassword);
+      } catch (fbErr: unknown) {
+        const fbCode = (fbErr as { code?: string })?.code || '';
+        if (fbCode === 'auth/user-not-found' || fbCode === 'auth/invalid-credential') {
+          try {
+            await signUpWithEmail(adminEmail, adminPassword, 'Typixel Admin');
+          } catch {
+            // If Firebase Email/Password isn't enabled, prompt Google Sign-In while keeping Admin Token active
+            setInfoMsg('Admin verified! Click "Owner Admin (Google)" below to enter 3D Green Valley.');
+            setLoading(false);
+          }
+        } else {
+          setInfoMsg('Admin verified! Click "Owner Admin (Google)" below to enter 3D Green Valley.');
+          setLoading(false);
+        }
+      }
+    } catch {
+      setError('Could not reach Green Valley server for Admin Login.');
+      setLoading(false);
+    }
+  };
+
   const featuredAd = SHOWCASE_ADS[adIndex];
-  const checkedCurrent = Boolean(verifyResult && verifyResult.instagramId === cleanInputIg);
 
   return (
     <div className="relative w-full h-screen overflow-hidden bg-[#0b1014] text-[#f4f7f5] flex flex-col justify-between">
@@ -337,10 +352,10 @@ export function LoginScreen() {
             decoding="async"
             referrerPolicy="no-referrer"
             onError={() => setHeroLoaded(false)}
-            className="w-full h-full object-cover object-center opacity-80"
+            className="w-full h-full object-cover object-center opacity-75"
           />
         )}
-        <div className="absolute inset-0 bg-gradient-to-r from-[#080d11]/95 via-[#080d11]/75 to-[#080d11]/35" />
+        <div className="absolute inset-0 bg-gradient-to-r from-[#080d11]/95 via-[#080d11]/75 to-[#080d11]/40" />
         <div className="absolute inset-0 bg-gradient-to-t from-[#080d11]/95 via-transparent to-[#080d11]/60" />
       </div>
 
@@ -351,11 +366,11 @@ export function LoginScreen() {
         </span>
 
         <div className="hidden lg:flex items-center gap-5 text-xs text-slate-300">
-          <span>Active Hospital &amp; Buildings</span>
+          <span>Hashim&apos;s &amp; Rifad&apos;s Villas</span>
           <span className="text-slate-600">·</span>
-          <span>KSRTC Bus &amp; Tea Stalls</span>
+          <span>50+ Arcade Games &amp; Sports</span>
           <span className="text-slate-600">·</span>
-          <span>Single-to-Mingle &amp; Weddings</span>
+          <span>Live Phone, Hospital &amp; KSRTC</span>
         </div>
 
         <button
@@ -374,15 +389,15 @@ export function LoginScreen() {
           {/* Left Hero + Live @typixelofficial Showcase Ad Banner */}
           <div className="lg:col-span-6 space-y-5">
             <p className="text-xs font-semibold uppercase tracking-wider text-emerald-400">
-              Green Valley · 3D Open World Life Sim
+              Green Valley · Expanded 3D Open World
             </p>
             <h1 className="font-display text-3xl sm:text-5xl font-extrabold tracking-tight text-white leading-[1.06] [text-wrap:balance]">
-              Live, Drive KSRTC, Start a Tea Stall &amp; Mingle in Green Valley
+              Build Your Home, Play 50+ Games &amp; Live in Green Valley
             </h1>
             <p className="text-sm text-slate-300 leading-relaxed max-w-lg">
-              Enter active hospitals, malls &amp; colleges, open your own 3D Chaya Kada, claim 7-day
-              Daily Login Rewards, join hourly Single-to-Mingle weddings &amp; lakeside honeymoons,
-              and arrive straight at your Instagram-linked home!
+              Explore the expanded village, visit Hashim&apos;s &amp; Rifad&apos;s Palace Villas,
+              play 3D football &amp; volleyball, hunt the hidden cliff VIP card for the Grand Game
+              Center, call friends on your smartphone, and run your own Tea Stall.
             </p>
 
             {/* Live GitHub + Instagram Showcase Ad Card */}
@@ -396,6 +411,7 @@ export function LoginScreen() {
                 <img
                   src={featuredAd.imageUrl}
                   alt={featuredAd.title}
+                  loading="lazy"
                   className="w-20 h-20 rounded-lg object-cover bg-slate-900 shrink-0 border border-white/10"
                 />
                 <div className="min-w-0 flex-1">
@@ -413,135 +429,86 @@ export function LoginScreen() {
             </a>
           </div>
 
-          {/* Right Auth Card with REAL Follower Verification Gate */}
+          {/* Right Auth Card with Simple Direct-Open Instagram Monitor + Admin Tab */}
           <div className="lg:col-span-6 flex lg:justify-end">
-            <div className="w-full max-w-[450px] bg-[#0e151b]/95 border border-white/14 rounded-xl overflow-hidden">
-              {/* Step 1: Real Instagram Follower Verification */}
-              <div className="p-4 bg-[#0a1117] border-b border-white/10 space-y-2.5">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-xs font-bold text-white flex items-center gap-1.5">
-                    <Instagram className="w-4 h-4 text-pink-400" />
-                    Step 1: Verify You Follow Both Pages
-                  </span>
-                  <span
-                    className={`text-[11px] font-semibold ${
-                      isCurrentIdVerified ? 'text-emerald-400' : 'text-amber-300'
-                    }`}
-                  >
-                    {isCurrentIdVerified ? 'Verified ✓' : 'Locked'}
-                  </span>
-                </div>
-
-                {/* Follow Links (Opening links does NOT auto-unlock!) */}
-                <div className="grid grid-cols-2 gap-2">
-                  <a
-                    href="https://www.instagram.com/typixelofficial/"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className={`flex items-center justify-between gap-1.5 px-3 py-2 rounded-lg border text-xs font-semibold transition-colors ${
-                      checkedCurrent && verifyResult?.followsOfficial
-                        ? 'bg-emerald-950/50 border-emerald-500/45 text-emerald-200'
-                        : checkedCurrent
-                          ? 'bg-rose-950/40 border-rose-500/40 text-rose-200 hover:bg-rose-900/40'
-                          : 'bg-pink-950/30 border-pink-500/35 text-pink-100 hover:bg-pink-900/40'
-                    }`}
-                  >
-                    <span className="truncate">@typixelofficial</span>
-                    {checkedCurrent ? (
-                      verifyResult?.followsOfficial ? (
-                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                      ) : (
-                        <XCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
-                      )
-                    ) : (
-                      <ExternalLink className="w-3.5 h-3.5 shrink-0" />
-                    )}
-                  </a>
-
-                  <a
-                    href="https://www.instagram.com/typixel.studio/"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className={`flex items-center justify-between gap-1.5 px-3 py-2 rounded-lg border text-xs font-semibold transition-colors ${
-                      checkedCurrent && verifyResult?.followsStudio
-                        ? 'bg-emerald-950/50 border-emerald-500/45 text-emerald-200'
-                        : checkedCurrent
-                          ? 'bg-rose-950/40 border-rose-500/40 text-rose-200 hover:bg-rose-900/40'
-                          : 'bg-pink-950/30 border-pink-500/35 text-pink-100 hover:bg-pink-900/40'
-                    }`}
-                  >
-                    <span className="truncate">@typixel.studio</span>
-                    {checkedCurrent ? (
-                      verifyResult?.followsStudio ? (
-                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                      ) : (
-                        <XCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
-                      )
-                    ) : (
-                      <ExternalLink className="w-3.5 h-3.5 shrink-0" />
-                    )}
-                  </a>
-                </div>
-
-                {/* Real ID Check Form */}
-                <form onSubmit={handleVerifyFollowers} className="flex items-center gap-2">
-                  <div className="relative flex-1">
-                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-pink-400 text-xs font-bold">
-                      @
+            <div className="w-full max-w-[460px] bg-[#0e151b]/95 border border-white/14 rounded-xl overflow-hidden">
+              {/* Step 1: Simple Direct Instagram Open Monitor (hidden on Admin tab) */}
+              {tab !== 'admin' && (
+                <div className="p-4 bg-[#0a1117] border-b border-white/10 space-y-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-bold text-white flex items-center gap-1.5">
+                      <Instagram className="w-4 h-4 text-pink-400" />
+                      Step 1: Follow Both Pages on Instagram
                     </span>
-                    <input
-                      type="text"
-                      maxLength={30}
-                      value={verifyIgInput}
-                      onChange={(e) => {
-                        setVerifyIgInput(e.target.value.replace(/^@+/, ''));
-                        setError(null);
-                      }}
-                      placeholder="your_instagram_id"
-                      className="w-full pl-7 pr-3 py-2 bg-[#0e151b] border border-white/15 focus:border-pink-400 rounded-lg text-xs text-white placeholder-slate-500 outline-none"
-                    />
-                  </div>
-                  <button
-                    type="submit"
-                    disabled={verifyingFollow || cleanInputIg.length < 2}
-                    className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-pink-600 hover:bg-pink-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors whitespace-nowrap cursor-pointer"
-                  >
-                    <SearchCheck className="w-3.5 h-3.5" />
-                    <span>{verifyingFollow ? 'Checking...' : 'Check Followers'}</span>
-                  </button>
-                </form>
-
-                {/* If checked and not found yet, allow requesting admin follower verification */}
-                {checkedCurrent && !verifyResult?.verified && (
-                  <div className="flex items-center justify-between gap-2 pt-0.5 text-[11px]">
-                    <span className="text-slate-400 flex items-center gap-1">
-                      <ShieldAlert className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                      Just followed both pages?
-                    </span>
-                    <button
-                      type="button"
-                      disabled={requestingReview || reviewRequestedFor === cleanInputIg}
-                      onClick={() => void handleRequestVerification()}
-                      className="inline-flex items-center gap-1 px-2.5 py-1 bg-amber-600/25 hover:bg-amber-600/40 border border-amber-400/40 disabled:opacity-60 text-amber-200 font-semibold rounded-md cursor-pointer"
+                    <span
+                      className={`text-[11px] font-semibold ${
+                        isUnlocked ? 'text-emerald-400' : 'text-amber-300'
+                      }`}
                     >
-                      <Send className="w-3 h-3" />
-                      {reviewRequestedFor === cleanInputIg
-                        ? 'Request Sent ✓'
-                        : requestingReview
-                          ? 'Sending...'
-                          : 'Request Verification'}
-                    </button>
+                      {isUnlocked ? 'Ready ✓' : 'Tap Links'}
+                    </span>
                   </div>
-                )}
-              </div>
 
-              {/* Tabs: Sign In / Sign Up / Reset */}
-              <div className="grid grid-cols-3 border-b border-white/10 bg-[#0a1015]">
+                  <div className="grid grid-cols-2 gap-2">
+                    <a
+                      href="https://www.instagram.com/typixelofficial/"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={() => handleOpenInstagram('official')}
+                      className={`flex items-center justify-between gap-1.5 px-3 py-2 rounded-lg border text-xs font-semibold transition-colors ${
+                        visitedOfficial
+                          ? 'bg-emerald-950/50 border-emerald-500/45 text-emerald-200'
+                          : 'bg-pink-950/30 border-pink-500/35 text-pink-100 hover:bg-pink-900/40'
+                      }`}
+                    >
+                      <span className="truncate">@typixelofficial</span>
+                      {visitedOfficial ? (
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                      ) : (
+                        <ExternalLink className="w-3.5 h-3.5 shrink-0" />
+                      )}
+                    </a>
+
+                    <a
+                      href="https://www.instagram.com/typixel.studio/"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={() => handleOpenInstagram('studio')}
+                      className={`flex items-center justify-between gap-1.5 px-3 py-2 rounded-lg border text-xs font-semibold transition-colors ${
+                        visitedStudio
+                          ? 'bg-emerald-950/50 border-emerald-500/45 text-emerald-200'
+                          : 'bg-pink-950/30 border-pink-500/35 text-pink-100 hover:bg-pink-900/40'
+                      }`}
+                    >
+                      <span className="truncate">@typixel.studio</span>
+                      {visitedStudio ? (
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                      ) : (
+                        <ExternalLink className="w-3.5 h-3.5 shrink-0" />
+                      )}
+                    </a>
+                  </div>
+
+                  <label className="flex items-center gap-2 text-[11px] text-slate-300 cursor-pointer select-none pt-0.5">
+                    <input
+                      type="checkbox"
+                      checked={isUnlocked}
+                      onChange={(e) => setConfirmedFollowed(e.target.checked)}
+                      className="w-3.5 h-3.5 rounded accent-emerald-500"
+                    />
+                    <span>I follow @typixelofficial and @typixel.studio on Instagram</span>
+                  </label>
+                </div>
+              )}
+
+              {/* Tabs: Sign In / Sign Up / Forgot / Admin */}
+              <div className="grid grid-cols-4 border-b border-white/10 bg-[#0a1015]">
                 {(
                   [
                     ['signin', 'Sign In'],
-                    ['signup', 'Insta Sign Up'],
-                    ['forgot', 'Forgot Pass'],
+                    ['signup', 'Sign Up'],
+                    ['forgot', 'Reset'],
+                    ['admin', 'Admin'],
                   ] as [AuthTab, string][]
                 ).map(([id, label]) => (
                   <button
@@ -554,7 +521,9 @@ export function LoginScreen() {
                     }}
                     className={`py-2.5 text-xs font-semibold transition-colors cursor-pointer ${
                       tab === id
-                        ? 'text-white bg-[#0e151b] border-b-2 border-emerald-500'
+                        ? id === 'admin'
+                          ? 'text-amber-300 bg-[#0e151b] border-b-2 border-amber-500'
+                          : 'text-white bg-[#0e151b] border-b-2 border-emerald-500'
                         : 'text-slate-400 hover:text-slate-200'
                     }`}
                   >
@@ -569,22 +538,16 @@ export function LoginScreen() {
                     <button
                       type="button"
                       onClick={handleGoogleSignIn}
-                      disabled={loading || !isCurrentIdVerified}
+                      disabled={loading || !isUnlocked}
                       className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-45 disabled:cursor-not-allowed text-white font-semibold text-sm rounded-lg transition-colors cursor-pointer"
                     >
                       <LogIn className="w-4 h-4 shrink-0" />
-                      <span>
-                        {loading
-                          ? 'Signing in...'
-                          : isCurrentIdVerified
-                            ? 'Continue with Gmail (Google)'
-                            : 'Verify Followers First to Sign In'}
-                      </span>
+                      <span>{loading ? 'Signing in...' : 'Continue with Gmail (Google)'}</span>
                     </button>
 
                     <div className="flex items-center gap-3 text-[11px] text-slate-500">
                       <div className="flex-1 h-px bg-white/10" />
-                      <span>or Instagram username / Gmail</span>
+                      <span>or Instagram username &amp; password</span>
                       <div className="flex-1 h-px bg-white/10" />
                     </div>
 
@@ -594,7 +557,7 @@ export function LoginScreen() {
                         required
                         value={igOrEmail}
                         onChange={(e) => setIgOrEmail(e.target.value)}
-                        placeholder="@instagram_username or your@gmail.com"
+                        placeholder="Username (e.g. __hashim_mhd_ / _rifadeeyy) or Gmail"
                         className="w-full px-3.5 py-2.5 bg-[#0a1015] border border-white/15 focus:border-emerald-500 rounded-lg text-sm text-white placeholder-slate-500 outline-none"
                       />
                       <input
@@ -602,11 +565,11 @@ export function LoginScreen() {
                         required
                         value={password}
                         onChange={(e) => setPassword(e.target.value)}
-                        placeholder="Game Password"
+                        placeholder="Password"
                         className="w-full px-3.5 py-2.5 bg-[#0a1015] border border-white/15 focus:border-emerald-500 rounded-lg text-sm text-white placeholder-slate-500 outline-none"
                       />
                       <div className="flex items-center justify-between text-[11px]">
-                        <span className="text-slate-400">Matches your home automatically</span>
+                        <span className="text-slate-400">Villa owners matched by username</span>
                         <button
                           type="button"
                           onClick={() => {
@@ -620,7 +583,7 @@ export function LoginScreen() {
                       </div>
                       <button
                         type="submit"
-                        disabled={loading || !isCurrentIdVerified}
+                        disabled={loading || !isUnlocked}
                         className="w-full py-2.5 bg-white/10 hover:bg-white/16 disabled:opacity-45 disabled:cursor-not-allowed text-white font-semibold text-sm rounded-lg transition-colors cursor-pointer"
                       >
                         {loading ? 'Signing in...' : 'Sign In'}
@@ -639,11 +602,10 @@ export function LoginScreen() {
                         <input
                           type="text"
                           required
-                          readOnly={isCurrentIdVerified}
                           maxLength={30}
-                          value={isCurrentIdVerified ? cleanInputIg : instagramId}
+                          value={instagramId}
                           onChange={(e) => setInstagramId(e.target.value.replace(/^@+/, ''))}
-                          placeholder="verified_insta_id"
+                          placeholder="__hashim_mhd_"
                           className="w-full pl-7 pr-3 py-2.5 bg-[#0a1015] border border-white/15 focus:border-emerald-500 rounded-lg text-xs text-white placeholder-slate-500 outline-none"
                         />
                       </div>
@@ -658,10 +620,9 @@ export function LoginScreen() {
                     </div>
                     <input
                       type="email"
-                      required
                       value={gmail}
                       onChange={(e) => setGmail(e.target.value)}
-                      placeholder="Your Gmail (for verification & reset link)"
+                      placeholder="Optional Gmail (for password reset link)"
                       className="w-full px-3.5 py-2.5 bg-[#0a1015] border border-white/15 focus:border-emerald-500 rounded-lg text-sm text-white placeholder-slate-500 outline-none"
                     />
                     <input
@@ -670,30 +631,25 @@ export function LoginScreen() {
                       minLength={6}
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
-                      placeholder="Create Green Valley Password (min 6 chars)"
+                      placeholder="Set Green Valley Password (min 6 chars)"
                       className="w-full px-3.5 py-2.5 bg-[#0a1015] border border-white/15 focus:border-emerald-500 rounded-lg text-sm text-white placeholder-slate-500 outline-none"
                     />
                     <p className="text-[11px] text-slate-400 leading-snug">
-                      Use a new Green Valley password (never enter your real Instagram password).
+                      Villa owners <strong>__hashim_mhd_</strong> and <strong>_rifadeeyy</strong>{' '}
+                      set their password here on first sign-up.
                     </p>
                     <button
                       type="submit"
-                      disabled={loading || !isCurrentIdVerified}
+                      disabled={loading || !isUnlocked}
                       className="w-full flex items-center justify-center gap-2 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-45 disabled:cursor-not-allowed text-white font-semibold text-sm rounded-lg transition-colors cursor-pointer"
                     >
                       <UserPlus className="w-4 h-4" />
-                      <span>
-                        {loading
-                          ? 'Creating Account...'
-                          : isCurrentIdVerified
-                            ? 'Sign Up with Verified Instagram ID'
-                            : 'Verify Followers First'}
-                      </span>
+                      <span>{loading ? 'Creating Account...' : 'Create Account & Enter'}</span>
                     </button>
                     <button
                       type="button"
                       onClick={handleGoogleSignIn}
-                      disabled={loading || !isCurrentIdVerified}
+                      disabled={loading || !isUnlocked}
                       className="w-full flex items-center justify-center gap-2 py-2 bg-white/10 hover:bg-white/15 disabled:opacity-45 disabled:cursor-not-allowed text-white font-semibold text-xs rounded-lg transition-colors cursor-pointer"
                     >
                       <Mail className="w-3.5 h-3.5" />
@@ -705,8 +661,7 @@ export function LoginScreen() {
                 {tab === 'forgot' && (
                   <form onSubmit={handleForgotPassword} className="space-y-3">
                     <p className="text-xs text-slate-300 leading-relaxed">
-                      Enter your registered Gmail address and we will email a secure password reset
-                      link immediately.
+                      Enter your registered Gmail address to receive a secure password reset link.
                     </p>
                     <input
                       type="email"
@@ -727,6 +682,90 @@ export function LoginScreen() {
                   </form>
                 )}
 
+                {tab === 'admin' && (
+                  <div className="space-y-3">
+                    <div>
+                      <h2 className="text-sm font-bold text-white flex items-center gap-1.5">
+                        <Shield className="w-4 h-4 text-amber-400" />
+                        Green Valley Admin Access
+                      </h2>
+                      <p className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
+                        Manage village size, custom homes, shop spaces, Palace Villas, and broadcast
+                        Typixel updates to every citizen&apos;s phone.
+                      </p>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={handleGoogleSignIn}
+                      disabled={loading}
+                      className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white font-semibold text-xs rounded-lg transition-colors cursor-pointer"
+                    >
+                      <ShieldCheck className="w-4 h-4" />
+                      <span>Sign in as Owner Admin (Google)</span>
+                    </button>
+
+                    <div className="flex items-center gap-3 text-[11px] text-slate-500">
+                      <div className="flex-1 h-px bg-white/10" />
+                      <span>
+                        {adminConfigured === false
+                          ? 'first-run: set admin passcode'
+                          : 'or admin username & password'}
+                      </span>
+                      <div className="flex-1 h-px bg-white/10" />
+                    </div>
+
+                    <form onSubmit={handleAdminSubmit} className="space-y-2.5">
+                      <input
+                        type="text"
+                        required
+                        value={adminUsername}
+                        onChange={(e) => setAdminUsername(e.target.value)}
+                        placeholder="Admin username (typixelofficial)"
+                        className="w-full px-3.5 py-2.5 bg-[#0a1015] border border-white/15 focus:border-amber-500 rounded-lg text-sm text-white placeholder-slate-500 outline-none"
+                      />
+                      <input
+                        type="password"
+                        required
+                        minLength={6}
+                        value={adminPassword}
+                        onChange={(e) => setAdminPassword(e.target.value)}
+                        placeholder={
+                          adminConfigured === false
+                            ? 'Set server admin password (min 6 chars)'
+                            : 'Admin password'
+                        }
+                        className="w-full px-3.5 py-2.5 bg-[#0a1015] border border-white/15 focus:border-amber-500 rounded-lg text-sm text-white placeholder-slate-500 outline-none"
+                      />
+                      {adminConfigured === false && (
+                        <input
+                          type="password"
+                          required
+                          minLength={6}
+                          value={adminConfirmPassword}
+                          onChange={(e) => setAdminConfirmPassword(e.target.value)}
+                          placeholder="Confirm admin password"
+                          className="w-full px-3.5 py-2.5 bg-[#0a1015] border border-white/15 focus:border-amber-500 rounded-lg text-sm text-white placeholder-slate-500 outline-none"
+                        />
+                      )}
+                      <button
+                        type="submit"
+                        disabled={loading}
+                        className="w-full flex items-center justify-center gap-2 py-2.5 bg-white/12 hover:bg-white/18 disabled:opacity-50 text-amber-200 font-semibold text-sm rounded-lg transition-colors cursor-pointer"
+                      >
+                        <KeyRound className="w-4 h-4" />
+                        <span>
+                          {loading
+                            ? 'Authenticating...'
+                            : adminConfigured === false
+                              ? 'Claim & Unlock Admin Studio'
+                              : 'Sign In as Admin'}
+                        </span>
+                      </button>
+                    </form>
+                  </div>
+                )}
+
                 {infoMsg && (
                   <div className="text-xs text-emerald-200 bg-emerald-950/60 border border-emerald-500/35 rounded-lg px-3 py-2.5 leading-relaxed">
                     {infoMsg}
@@ -741,14 +780,6 @@ export function LoginScreen() {
                     {error}
                   </div>
                 )}
-
-                <div className="flex items-center gap-2 text-[11px] text-slate-400 pt-0.5">
-                  <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
-                  <span>
-                    Login checks your real Instagram ID against the followers of @typixelofficial &amp;
-                    @typixel.studio.
-                  </span>
-                </div>
               </div>
             </div>
           </div>
@@ -758,7 +789,7 @@ export function LoginScreen() {
       {/* Footer */}
       <footer className="relative z-10 w-full max-w-[1440px] mx-auto px-6 md:px-10 py-3.5 flex items-center justify-between text-xs text-slate-400 border-t border-white/10 shrink-0">
         <span>TYPIXEL OPEN WORLD · @typixelofficial &amp; @typixel.studio</span>
-        <span>WASD Move · E Enter/Interact · M Zoom Map · T Chat · V Voice</span>
+        <span>WASD Move · E Interact · M Map · P Phone · K Kick Ball</span>
       </footer>
 
       {/* Quick Guide Modal */}
@@ -775,27 +806,24 @@ export function LoginScreen() {
                 <X className="w-5 h-5" />
               </button>
             </div>
-            <ul className="space-y-2.5 text-xs text-slate-300 leading-relaxed list-disc pl-5">
+            <ul className="space-y-2 text-xs text-slate-300 leading-relaxed list-disc pl-5">
               <li>
-                Follow both <strong>@typixelofficial</strong> and <strong>@typixel.studio</strong> on
-                Instagram, enter your exact Instagram username in Step 1, and click{' '}
-                <strong>Check Followers</strong>.
+                Tap <strong>@typixelofficial</strong> and <strong>@typixel.studio</strong> to open
+                Instagram, follow both pages, and return — sign-in unlocks immediately.
               </li>
               <li>
-                Owners can sync live follower lists anytime inside{' '}
-                <strong>Admin Studio → Followers</strong> (using Instagram&apos;s official{' '}
-                <code>followers_1.json</code> export or a live Instagram Data API key).
+                <strong>Hashim&apos;s Villa</strong> (<code>__hashim_mhd_</code>) and{' '}
+                <strong>Rifad&apos;s Villa</strong> (<code>_rifadeeyy</code>) recognize their owners
+                by username; visitors pay at the outer compound gate and enter inside only with the
+                Secret Key.
               </li>
               <li>
-                Claim your <strong>Daily Login Reward</strong> every day for escalating Green Coins.
+                Collect the hidden <strong>VIP Game Center Entrance Card</strong> atop Danger Peak
+                Cliff to unlock all 50+ cheap arcade games in the Grand Game Center.
               </li>
               <li>
-                Walk up to any building portal (Hospital, Mall, KSRTC Terminal, School, Wedding
-                Mandapam) and press <strong>E</strong> to enter and use services!
-              </li>
-              <li>
-                Open your own <strong>Kerala Tea Stall (Chaya Kada)</strong> or shop from the{' '}
-                <strong>Shops</strong> menu and earn coins from customers!
+                Keep an eye on your <strong>Health Bar</strong>: sprinting, falling from high cliffs,
+                or rain drains HP — visit the Hospital or drink hot Chaya when below 50%!
               </li>
             </ul>
             <div className="flex justify-end">

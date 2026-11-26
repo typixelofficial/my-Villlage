@@ -3,14 +3,17 @@ import * as THREE from 'three';
 import type {
   AnimationState,
   CharacterAppearance,
+  HeldItemType,
   InteractablePrompt,
 } from '../shared/types.ts';
 import {
   ACTIVE_BUILDINGS,
   ATM_LOCATIONS,
   BUSINESSES,
+  HIDDEN_CARD_POS,
   MISSIONS,
   NPCS,
+  PALACE_VILLAS,
   PROPERTIES,
   WORLD_SPAWN,
   getDistrictAt,
@@ -30,10 +33,13 @@ import {
   buildCustomHomeMesh,
   buildCustomShopMesh,
   buildGreenValleyWorld,
+  buildPublicBusMesh,
+  buildSportsBallMesh,
 } from '../game/worldBuilder.ts';
 import {
   animateCharacterRig,
   buildCharacterRig,
+  setCharacterHeldItem,
   type CharacterRig,
 } from '../game/characterMesh.ts';
 import { buildVehicleRig, type VehicleRig } from '../game/vehicleMesh.ts';
@@ -60,6 +66,7 @@ interface RemoteVisual {
   rig: CharacterRig;
   plate: THREE.Sprite;
   appearanceKey: string;
+  lastHeldItem: HeldItemType;
   lastDisplayName: string;
   lastInstagramId: string;
   lastChatBubble: string;
@@ -159,7 +166,7 @@ export function WorldViewport({
 
     // Build Local Player Character Rig
     const initialProfile = useGameStore.getState().profile;
-    let localAppearanceKey = JSON.stringify(initialProfile?.appearance || {});
+    let localAppearanceKey = `${JSON.stringify(initialProfile?.appearance || {})}|m${initialProfile?.muscleLevel || 0}`;
     let localRig = buildCharacterRig(
       initialProfile?.appearance || {
         gender: 'male',
@@ -172,8 +179,20 @@ export function WorldViewport({
         shoeColor: '#e5e7eb',
         accessory: 'none',
       },
+      initialProfile?.muscleLevel || 0,
     );
+    let localHeldApplied: HeldItemType = 'none';
     scene.add(localRig.root);
+
+    // Full-Time Automated KSRTC Public Bus + Playable 3D Sports Balls
+    const publicBusRig = buildPublicBusMesh();
+    publicBusRig.group.visible = false;
+    scene.add(publicBusRig.group);
+
+    const footballRig = buildSportsBallMesh('football');
+    scene.add(footballRig.mesh);
+    const volleyballRig = buildSportsBallMesh('volleyball');
+    scene.add(volleyballRig.mesh);
 
     // Local Actor Physics State
     const startPos = initialProfile?.lastPosition || WORLD_SPAWN;
@@ -186,6 +205,7 @@ export function WorldViewport({
       vz: 0,
       rotY: 0,
       onGround: true,
+      peakAirY: 0,
       anim: 'idle' as AnimationState,
       emoteUntil: 0,
       activeEmote: null as AnimationState | null,
@@ -224,10 +244,17 @@ export function WorldViewport({
     const customHomeVisuals = new Map<string, { group: THREE.Group; dispose: () => void }>();
 
     // Dynamic Custom 3D Player Shops Map (Tea Stalls, Juice Bars, Bakeries, Boutiques, Tech)
-    const customShopVisuals = new Map<string, { group: THREE.Group; dispose: () => void }>();
+    const customShopVisuals = new Map<
+      string,
+      { group: THREE.Group; shopKey: string; dispose: () => void }
+    >();
 
-    // Track property sign updates
+    // Track property & palace villa sign updates and expandable boundary
     const appliedPropertyOwners = new Map<string, string>();
+    const appliedVillaBoards = new Map<string, string>();
+    let appliedVillageHalfSize = useGameStore.getState().villageHalfSize;
+    physics.setWorldHalfSize(appliedVillageHalfSize);
+    world.updateBoundaryRing(appliedVillageHalfSize);
 
     // Camera Orbit State
     const camState = {
@@ -301,6 +328,20 @@ export function WorldViewport({
         store.openBuildingPanel(prompt.targetId);
       } else if (prompt.type === 'custom_shop') {
         store.openPlayerShopPanel(prompt.targetId);
+      } else if (prompt.type === 'public_bus') {
+        store.setActivePanel('transit');
+      } else if (prompt.type === 'villa') {
+        store.openVillaPanel(prompt.targetId);
+      } else if (prompt.type === 'hidden_card') {
+        multiplayer.collectHiddenGameCard();
+      } else if (prompt.type === 'sports_ball') {
+        const bId = prompt.targetId === 'volleyball' ? 'volleyball' : 'football';
+        multiplayer.kickSportsBall(
+          bId,
+          Math.sin(playerState.rotY),
+          Math.cos(playerState.rotY),
+          bId === 'volleyball' ? 16 : 21,
+        );
       } else if (prompt.type === 'atm') {
         store.setActivePanel('wallet');
       } else if (prompt.type === 'shop') {
@@ -344,6 +385,24 @@ export function WorldViewport({
 
       if (e.code === 'KeyE') {
         handleInteract();
+      } else if (e.code === 'KeyP') {
+        const st = useGameStore.getState();
+        st.setActivePanel(st.activePanel === 'phone' ? null : 'phone');
+      } else if (e.code === 'KeyK') {
+        const balls = useGameStore.getState().sportsBalls;
+        for (const bId of ['football', 'volleyball'] as const) {
+          const b = balls[bId];
+          if (b && Math.hypot(playerState.x - b.x, playerState.z - b.z) < 3.6) {
+            multiplayer.kickSportsBall(
+              bId,
+              Math.sin(playerState.rotY),
+              Math.cos(playerState.rotY),
+              bId === 'volleyball' ? 16 : 21,
+            );
+            playSfx('jump');
+            break;
+          }
+        }
       } else if (e.code === 'KeyM') {
         const st = useGameStore.getState();
         st.setShowWorldMapModal(!st.showWorldMapModal);
@@ -441,14 +500,18 @@ export function WorldViewport({
     let fpsAccum = 0;
     let lastSavedX = playerState.x;
     let lastSavedZ = playerState.z;
+    let mingleScreenTimer = 0;
+    let hpDrainAccum = 0;
+    let lastBallAutoKickMs = 0;
 
-    const rebuildLocalRigIfNeeded = (appearance: CharacterAppearance) => {
-      const nextKey = JSON.stringify(appearance);
+    const rebuildLocalRigIfNeeded = (appearance: CharacterAppearance, muscleLevel = 0) => {
+      const nextKey = `${JSON.stringify(appearance)}|m${muscleLevel}`;
       if (nextKey === localAppearanceKey) return;
       localAppearanceKey = nextKey;
       scene.remove(localRig.root);
       localRig.dispose();
-      localRig = buildCharacterRig(appearance);
+      localRig = buildCharacterRig(appearance, muscleLevel);
+      localHeldApplied = 'none';
       scene.add(localRig.root);
     };
 
@@ -469,9 +532,27 @@ export function WorldViewport({
 
       const store = useGameStore.getState();
 
-      // 1. Rebuild local rig if customized
+      // 1. Rebuild local rig if customized or gym muscle changed, and sync expandable village boundary
       if (store.profile) {
-        rebuildLocalRigIfNeeded(store.profile.appearance);
+        rebuildLocalRigIfNeeded(store.profile.appearance, store.profile.muscleLevel || 0);
+      }
+      if (store.villageHalfSize !== appliedVillageHalfSize) {
+        appliedVillageHalfSize = store.villageHalfSize;
+        physics.setWorldHalfSize(appliedVillageHalfSize);
+        world.updateBoundaryRing(appliedVillageHalfSize);
+      }
+
+      // Sync visible held item in player's hand (Tea, Latte, Juice, Snacks, Sports items)
+      const activeHeld: HeldItemType =
+        store.localHeldItem !== 'none' && Date.now() <= store.localHeldItemUntil
+          ? store.localHeldItem
+          : 'none';
+      if (store.localHeldItem !== 'none' && activeHeld === 'none') {
+        store.setLocalHeldItem('none', 0);
+      }
+      if (activeHeld !== localHeldApplied) {
+        localHeldApplied = activeHeld;
+        setCharacterHeldItem(localRig, activeHeld);
       }
 
       // 2. Handle pending teleport (from Properties / Vehicles / Friends / Missions quick-travel)
@@ -522,7 +603,25 @@ export function WorldViewport({
       const activeVeh = activeVehId ? store.vehicles[activeVehId] : null;
       let currentSpeedMps = 0;
 
-      if (activeVeh) {
+      const pBus = store.publicBus;
+      const myUid = store.firebaseUser?.uid || store.profile?.uid || '';
+      const ridingPublicBus = Boolean(
+        pBus &&
+          !activeVeh &&
+          (pBus.conductorUid === myUid || pBus.passengers.some((p) => p.uid === myUid)),
+      );
+
+      if (ridingPublicBus && pBus) {
+        lastActiveVehicleId = null;
+        localRig.root.visible = false;
+        playerState.x = pBus.x;
+        playerState.y = pBus.y + 0.6;
+        playerState.z = pBus.z;
+        playerState.rotY = pBus.rotY;
+        playerState.anim = 'sit';
+        currentSpeedMps = Math.abs(pBus.speed);
+        multiplayer.sendMove(playerState.x, playerState.y, playerState.z, playerState.rotY, 'sit', currentSpeedMps);
+      } else if (activeVeh) {
         if (lastActiveVehicleId !== activeVeh.id) {
           lastActiveVehicleId = activeVeh.id;
           playerState.x = activeVeh.x;
@@ -658,6 +757,7 @@ export function WorldViewport({
         if (jumping && playerState.onGround) {
           playerState.vy = 8.4;
           playerState.onGround = false;
+          playerState.peakAirY = playerState.y;
           playerState.activeEmote = null;
           playSfx('jump');
         }
@@ -671,10 +771,27 @@ export function WorldViewport({
 
         const groundY = physics.getGroundHeight(playerState.x, playerState.z);
         playerState.y += playerState.vy * dt;
+        if (!playerState.onGround) {
+          if (playerState.y > playerState.peakAirY) playerState.peakAirY = playerState.y;
+        }
         if (playerState.y <= groundY) {
+          if (!playerState.onGround) {
+            const drop = playerState.peakAirY - groundY;
+            if (drop > 3.5) {
+              const dmg = Math.min(48, Math.max(6, Math.round((drop - 3.0) * 8)));
+              const nextHp = Math.max(5, store.health - dmg);
+              store.setHealth(nextHp);
+              store.pushToast(
+                `Hard Fall! -${dmg} HP`,
+                nextHp < 50 ? 'Health below 50% — Visit Green Valley Hospital!' : 'Watch your step on steep cliffs!',
+                'rose',
+              );
+            }
+          }
           playerState.y = groundY;
           playerState.vy = 0;
           playerState.onGround = true;
+          playerState.peakAirY = groundY;
         }
 
         currentSpeedMps = Math.hypot(playerState.vx, playerState.vz);
@@ -683,7 +800,19 @@ export function WorldViewport({
           playerState.rotY += shortestAngleDelta(playerState.rotY, faceYaw) * (1 - Math.exp(-13 * dt));
         }
 
-        // Determine Character Animation State
+        // Health Decay from Sprinting Exertion & Rain Exposure (makes Hospital & Tea Stalls essential!)
+        const drainRate =
+          (currentSpeedMps > 7.8 ? 0.85 : 0) + (store.weatherMode === 'rain' ? 0.45 : 0);
+        if (drainRate > 0 && store.health > 15) {
+          hpDrainAccum += drainRate * dt;
+          if (hpDrainAccum >= 1) {
+            const lose = Math.floor(hpDrainAccum);
+            hpDrainAccum -= lose;
+            store.setHealth(Math.max(15, store.health - lose));
+          }
+        }
+
+        // Determine Character Animation State (with visible Drinking/Eating animations in hand!)
         if (!playerState.onGround) {
           playerState.anim = 'jump';
         } else if (currentSpeedMps > 7.5) {
@@ -692,6 +821,10 @@ export function WorldViewport({
           playerState.anim = 'walk';
         } else if (playerState.activeEmote && now < playerState.emoteUntil) {
           playerState.anim = playerState.activeEmote;
+        } else if (activeHeld === 'tea' || activeHeld === 'latte' || activeHeld === 'juice') {
+          playerState.anim = 'drink';
+        } else if (activeHeld === 'snack') {
+          playerState.anim = 'eat';
         } else {
           playerState.anim = 'idle';
         }
@@ -708,6 +841,25 @@ export function WorldViewport({
         localRig.root.position.set(playerState.x, playerState.y, playerState.z);
         localRig.root.rotation.y = playerState.rotY;
         animateCharacterRig(localRig, playerState.anim, dt, elapsed);
+
+        // Auto-kick playable 3D Football / Volleyball when running directly into the ball
+        if (currentSpeedMps > 1.0 && now - lastBallAutoKickMs > 420) {
+          const balls = store.sportsBalls;
+          for (const bId of ['football', 'volleyball'] as const) {
+            const b = balls[bId];
+            if (b && Math.hypot(playerState.x - b.x, playerState.z - b.z) < 1.35) {
+              lastBallAutoKickMs = now;
+              multiplayer.kickSportsBall(
+                bId,
+                Math.sin(playerState.rotY),
+                Math.cos(playerState.rotY),
+                Math.min(24, Math.max(13, currentSpeedMps * 2.1)),
+              );
+              playSfx('jump');
+              break;
+            }
+          }
+        }
 
         multiplayer.sendMove(
           playerState.x,
@@ -751,7 +903,7 @@ export function WorldViewport({
       // Keep sun shadow frustum centered near player for crisp shadows anywhere in Green Valley
       sunLight.target.position.set(playerState.x, 0, playerState.z);
 
-      // 8. Sync Remote Vehicles (not driven by local player)
+      // 8. Sync Remote Vehicles, Full-Time KSRTC Public Bus & Playable 3D Sports Balls
       syncVehiclesToScene();
       const vehiclesMap = store.vehicles;
       for (const veh of Object.values(vehiclesMap)) {
@@ -768,6 +920,37 @@ export function WorldViewport({
         }
       }
 
+      if (pBus) {
+        if (!publicBusRig.group.visible) {
+          publicBusRig.group.visible = true;
+          publicBusRig.group.position.set(pBus.x, pBus.y, pBus.z);
+          publicBusRig.group.rotation.y = pBus.rotY;
+        } else {
+          const bLerp = 1 - Math.exp(-10 * dt);
+          publicBusRig.group.position.x += (pBus.x - publicBusRig.group.position.x) * bLerp;
+          publicBusRig.group.position.y += (pBus.y - publicBusRig.group.position.y) * bLerp;
+          publicBusRig.group.position.z += (pBus.z - publicBusRig.group.position.z) * bLerp;
+          publicBusRig.group.rotation.y +=
+            shortestAngleDelta(publicBusRig.group.rotation.y, pBus.rotY) * bLerp;
+        }
+        if (Math.abs(pBus.speed) > 0.2) {
+          for (const w of publicBusRig.wheels) w.rotation.x += pBus.speed * dt * 1.9;
+        }
+      }
+
+      const sb = store.sportsBalls;
+      const syncBall = (rig: { mesh: THREE.Mesh }, state?: { x: number; y: number; z: number; vx: number; vz: number }) => {
+        if (!state) return;
+        const bLerp = 1 - Math.exp(-14 * dt);
+        rig.mesh.position.x += (state.x - rig.mesh.position.x) * bLerp;
+        rig.mesh.position.y += (Math.max(0.45, state.y) - rig.mesh.position.y) * bLerp;
+        rig.mesh.position.z += (state.z - rig.mesh.position.z) * bLerp;
+        rig.mesh.rotation.x += state.vz * dt * 1.8;
+        rig.mesh.rotation.z -= state.vx * dt * 1.8;
+      };
+      syncBall(footballRig, sb.football);
+      syncBall(volleyballRig, sb.volleyball);
+
       // 9. Sync & Smoothly Interpolate All Connected Remote Players
       const remotes = store.remotePlayers;
       const activeRemoteUids = new Set(Object.keys(remotes));
@@ -780,7 +963,7 @@ export function WorldViewport({
       }
 
       for (const rp of Object.values(remotes)) {
-        const appKey = JSON.stringify(rp.appearance);
+        const appKey = `${JSON.stringify(rp.appearance)}|m${rp.muscleLevel || 0}`;
         let vis = remoteVisuals.get(rp.uid);
         const vp = store.voicePeers[rp.uid];
         const voiceTag = vp?.speaking
@@ -796,7 +979,7 @@ export function WorldViewport({
             scene.remove(vis.rig.root);
             vis.rig.dispose();
           }
-          const rig = buildCharacterRig(rp.appearance);
+          const rig = buildCharacterRig(rp.appearance, rp.muscleLevel || 0);
           const plate = createNameplateSprite(rp.displayName, subline, rp.chatBubble, accentColor);
           plate.position.y = 2.52;
           rig.root.add(plate);
@@ -808,6 +991,7 @@ export function WorldViewport({
             rig,
             plate,
             appearanceKey: appKey,
+            lastHeldItem: 'none',
             lastDisplayName: rp.displayName,
             lastInstagramId: rp.instagramId || '',
             lastChatBubble: rp.chatBubble || '',
@@ -816,6 +1000,15 @@ export function WorldViewport({
             rotY: rp.rotY,
           };
           remoteVisuals.set(rp.uid, vis);
+        }
+
+        const rHeld: HeldItemType =
+          rp.heldItem && rp.heldItem !== 'none' && (!rp.heldItemUntil || Date.now() <= rp.heldItemUntil)
+            ? rp.heldItem
+            : 'none';
+        if (vis.lastHeldItem !== rHeld) {
+          vis.lastHeldItem = rHeld;
+          setCharacterHeldItem(vis.rig, rHeld);
         }
 
         // Update nameplate if display name, Instagram handle, voice state, or live chat bubble changed
@@ -885,7 +1078,7 @@ export function WorldViewport({
         }
       }
 
-      // 9c. Sync Dynamic Custom 3D Player Shops (Kerala Tea Stalls, Juice Bars, Bakeries, etc.)
+      // 9c. Sync Dynamic Custom 3D Player Shops (rebuilds cleanly if Admin expands/relocates!)
       const customShopsMap = store.customShops;
       for (const [shopId, vis] of customShopVisuals.entries()) {
         if (!customShopsMap[shopId]) {
@@ -896,7 +1089,14 @@ export function WorldViewport({
         }
       }
       for (const shop of Object.values(customShopsMap)) {
-        if (!customShopVisuals.has(shop.shopId)) {
+        const shopKey = `${shop.x}|${shop.z}|${shop.sizeTier || 'small'}|${shop.name}|${shop.hasSeating ? 1 : 0}|${shop.hasAc ? 1 : 0}`;
+        const existing = customShopVisuals.get(shop.shopId);
+        if (!existing || existing.shopKey !== shopKey) {
+          if (existing) {
+            scene.remove(existing.group);
+            existing.dispose();
+            physics.removeStaticBox(`cshop-${shop.shopId}`);
+          }
           const built = buildCustomShopMesh(shop);
           scene.add(built.group);
           physics.addStaticBox(
@@ -908,7 +1108,11 @@ export function WorldViewport({
             built.size.y,
             built.size.z,
           );
-          customShopVisuals.set(shop.shopId, { group: built.group, dispose: built.dispose });
+          customShopVisuals.set(shop.shopId, {
+            group: built.group,
+            shopKey,
+            dispose: built.dispose,
+          });
         }
       }
 
@@ -961,6 +1165,38 @@ export function WorldViewport({
         world.missionBeacon.rotation.y = elapsed * 1.2;
       } else {
         world.missionBeacon.visible = false;
+      }
+
+      // Hidden VIP Game Center Card animation & Live 3D Mingle Screen sync
+      world.hiddenCardGroup.visible = !store.profile?.hasGameCenterCard;
+      if (world.hiddenCardGroup.visible) {
+        world.hiddenCardGroup.rotation.y = elapsed * 2.1;
+        world.hiddenCardGroup.position.y = HIDDEN_CARD_POS.y + Math.sin(elapsed * 3.0) * 0.35;
+      }
+
+      mingleScreenTimer += dt;
+      if (mingleScreenTimer >= 1.2) {
+        mingleScreenTimer = 0;
+        world.updateMingleScreen(store.mingleEvent);
+      }
+
+      // Sync Hashim's Villa & Rifad's Villa custom signboards whenever renamed by owner/admin
+      for (const villa of Object.values(store.palaceVillas)) {
+        const key = `${villa.boardName}|${villa.visitFee}`;
+        if (appliedVillaBoards.get(villa.villaId) !== key) {
+          appliedVillaBoards.set(villa.villaId, key);
+          const signMesh = world.villaSigns.get(villa.villaId);
+          if (signMesh) {
+            const mat = signMesh.material as THREE.MeshStandardMaterial;
+            if (mat.map) mat.map.dispose();
+            mat.map = createSignTexture(
+              villa.boardName,
+              `Royal Palace · Visit ${villa.visitFee} GC · Key Required Inside`,
+              villa.accentColor,
+            );
+            mat.needsUpdate = true;
+          }
+        }
       }
 
       // Update Property Yard Signs when ownership changes
@@ -1281,6 +1517,80 @@ export function WorldViewport({
             }
           }
 
+          // Nearby Full-Time KSRTC Public Bus
+          if (pBus) {
+            const dBus = Math.hypot(playerState.x - pBus.x, playerState.z - pBus.z);
+            if (dBus < 8.5 && dBus < bestDist) {
+              bestDist = dBus;
+              bestPrompt = {
+                id: 'prompt-public-bus',
+                type: 'public_bus',
+                label: 'KSRTC 24/7 Public Bus & Conductor',
+                sublabel: `${pBus.currentStopName} · Fare ${pBus.fare} GC`,
+                targetId: pBus.id,
+                position: { x: pBus.x, y: pBus.y, z: pBus.z },
+              };
+            }
+          }
+
+          // Nearby Palace Villas (Hashim's Villa & Rifad's Villa)
+          const villasToCheck = Object.values(store.palaceVillas).length
+            ? Object.values(store.palaceVillas)
+            : PALACE_VILLAS;
+          for (const v of villasToCheck) {
+            const dGate = Math.hypot(playerState.x - v.gatePos.x, playerState.z - v.gatePos.z);
+            const dDoor = Math.hypot(playerState.x - v.doorPos.x, playerState.z - v.doorPos.z);
+            const d = Math.min(dGate, dDoor);
+            if (d < 8.5 && d < bestDist) {
+              bestDist = d;
+              bestPrompt = {
+                id: `prompt-villa-${v.villaId}`,
+                type: 'villa',
+                label: `Inspect ${v.boardName}`,
+                sublabel: `Visit Grounds (${v.visitFee} GC) or Unlock House with Key`,
+                targetId: v.villaId,
+                position: dGate < dDoor ? v.gatePos : v.doorPos,
+              };
+            }
+          }
+
+          // Hidden VIP Game Center Entrance Card (Danger Peak Cliff)
+          if (!store.profile?.hasGameCenterCard) {
+            const dCard = Math.hypot(
+              playerState.x - HIDDEN_CARD_POS.x,
+              playerState.z - HIDDEN_CARD_POS.z,
+            );
+            if (dCard < 5.0 && dCard < bestDist) {
+              bestDist = dCard;
+              bestPrompt = {
+                id: 'prompt-hidden-card',
+                type: 'hidden_card',
+                label: 'Collect Hidden VIP Entrance Card!',
+                sublabel: 'Unlocks Typixel Grand Game Center (54 Games)',
+                targetId: 'hidden_card',
+                position: HIDDEN_CARD_POS,
+              };
+            }
+          }
+
+          // Playable 3D Sports Balls (Football & Volleyball)
+          for (const bId of ['football', 'volleyball'] as const) {
+            const b = sb[bId];
+            if (!b) continue;
+            const dBall = Math.hypot(playerState.x - b.x, playerState.z - b.z);
+            if (dBall < 3.0 && dBall < bestDist) {
+              bestDist = dBall;
+              bestPrompt = {
+                id: `prompt-ball-${bId}`,
+                type: 'sports_ball',
+                label: bId === 'football' ? 'Kick Football (E / K)' : 'Spike Volleyball (E / K)',
+                sublabel: `Score ${b.scoreA} - ${b.scoreB}`,
+                targetId: bId,
+                position: { x: b.x, y: b.y, z: b.z },
+              };
+            }
+          }
+
           // Mall Shop interaction fallback
           const mallDist = Math.hypot(playerState.x - 58, playerState.z + 2);
           if (mallDist < 6.5 && mallDist < bestDist) {
@@ -1350,6 +1660,9 @@ export function WorldViewport({
       onInteractTriggerRef.current = null;
 
       localRig.dispose();
+      publicBusRig.dispose();
+      footballRig.dispose();
+      volleyballRig.dispose();
       for (const vis of remoteVisuals.values()) vis.rig.dispose();
       for (const vRig of vehicleRigs.values()) vRig.dispose();
       for (const ch of customHomeVisuals.values()) ch.dispose();

@@ -11,12 +11,20 @@ import type {
   EmoteType,
   FriendRequest,
   GardenStyle,
+  HeldItemType,
   InteriorTheme,
   MingleEventState,
   MingleParticipant,
   NetworkPlayer,
+  PalaceVillaDef,
+  PhoneCallState,
   PlayerProfile,
+  PublicAdDef,
+  PublicBusState,
   RelationshipStatus,
+  ShopSizeTier,
+  SportsBallState,
+  TypixelUpdateAlert,
   VehicleState,
   WorldPropertyOwnership,
 } from '../shared/types.ts';
@@ -26,25 +34,30 @@ import {
   CUSTOM_HOME_PLANS,
   CUSTOM_SHOP_PLANS,
   DAILY_LOGIN_REWARDS,
+  GAME_CENTER_GAMES,
   MINGLE_MEETUP_LOCATIONS,
   PROPERTIES,
   REWARDS,
   SHOP_ITEMS,
   VALLEY_SINGLES,
+  computeHouseTotalPrice,
+  computeShopTotalPrice,
   groundHeightAt,
+  isPositionOnRoad,
 } from '../shared/worldData.ts';
 import { useGameStore } from '../store/gameStore.ts';
 import {
   deleteCustomHomeFromFirestore,
   deleteCustomShopFromFirestore,
   getTodayDateKey,
-  getYesterdayDateKey,
   incrementCustomShopSales,
   recordWalletTransaction,
   saveCustomHomeToFirestore,
   saveCustomShopToFirestore,
+  savePublicAdToFirestore,
   saveWorldPropertyClaim,
   syncPlayerProgressToFirestore,
+  updateCustomShopKeyHash,
   updateWorldPropertyStyle,
 } from './firebase.ts';
 import { playSfx } from '../game/audio.ts';
@@ -52,6 +65,14 @@ import { voiceChat } from './voiceChat.ts';
 
 function levelFromXp(xp: number): number {
   return Math.max(1, Math.min(100, Math.floor(xp / 250) + 1));
+}
+
+function daysBetweenDateKeys(prevDateKey: string, currentDateKey: string): number {
+  if (!prevDateKey) return 999;
+  const p = Date.parse(`${prevDateKey}T00:00:00Z`);
+  const c = Date.parse(`${currentDateKey}T00:00:00Z`);
+  if (!Number.isFinite(p) || !Number.isFinite(c)) return 999;
+  return Math.floor((c - p) / 86400000);
 }
 
 class MultiplayerClient {
@@ -103,15 +124,16 @@ class MultiplayerClient {
     knownProperties: WorldPropertyOwnership[],
     knownCustomHomes: CustomHomeDef[],
     knownCustomShops: CustomShopDef[] = [],
+    knownPublicAds: PublicAdDef[] = [],
   ): Promise<void> {
     this.disconnect();
     const token = await user.getIdToken();
+    const adminToken = useGameStore.getState().adminBearerToken || undefined;
 
-    // Use polling -> websocket upgrade so Cloud Run proxies connect instantly & reliably
     const socket = io(window.location.origin, {
       path: '/socket.io',
       transports: ['polling', 'websocket'],
-      auth: { token },
+      auth: { token, adminToken },
       reconnection: true,
       reconnectionAttempts: 20,
       reconnectionDelay: 900,
@@ -136,6 +158,7 @@ class MultiplayerClient {
       const latestProps = Object.values(store.worldProperties);
       const latestHomes = Object.values(store.customHomes);
       const latestShops = Object.values(store.customShops);
+      const latestAds = store.publicAds;
       socket.emit('player:join', {
         displayName: currentProfile.displayName,
         instagramId: currentProfile.instagramId,
@@ -145,6 +168,8 @@ class MultiplayerClient {
         lastDailyLoginDate: currentProfile.lastDailyLoginDate,
         dailyLoginStreak: currentProfile.dailyLoginStreak,
         totalDailyLogins: currentProfile.totalDailyLogins,
+        muscleLevel: currentProfile.muscleLevel || 0,
+        hasGameCenterCard: Boolean(currentProfile.hasGameCenterCard),
         appearance: currentProfile.appearance,
         x: currentProfile.lastPosition.x,
         y: currentProfile.lastPosition.y,
@@ -161,6 +186,7 @@ class MultiplayerClient {
         knownProperties: latestProps.length ? latestProps : knownProperties,
         knownCustomHomes: latestHomes.length ? latestHomes : knownCustomHomes,
         knownCustomShops: latestShops.length ? latestShops : knownCustomShops,
+        knownPublicAds: latestAds.length ? latestAds : knownPublicAds,
       });
     });
 
@@ -185,16 +211,27 @@ class MultiplayerClient {
       (payload: {
         selfUid: string;
         isAdmin?: boolean;
+        villageHalfSize?: number;
         players: NetworkPlayer[];
         vehicles: VehicleState[];
+        publicBus?: PublicBusState;
         properties: WorldPropertyOwnership[];
         customHomes?: CustomHomeDef[];
         customShops?: CustomShopDef[];
+        publicAds?: PublicAdDef[];
+        palaceVillas?: PalaceVillaDef[];
+        typixelUpdates?: TypixelUpdateAlert[];
+        sportsBalls?: SportsBallState[];
         mingleEvent?: MingleEventState;
         voicePeers?: { uid: string; muted: boolean }[];
       }) => {
         const store = useGameStore.getState();
-        store.setIsAdmin(Boolean(payload.isAdmin));
+        if (typeof payload.isAdmin === 'boolean') {
+          store.setIsAdmin(payload.isAdmin || Boolean(store.adminBearerToken));
+        }
+        if (typeof payload.villageHalfSize === 'number') {
+          store.setVillageHalfSize(payload.villageHalfSize);
+        }
 
         const remotes: Record<string, NetworkPlayer> = {};
         for (const p of payload.players) {
@@ -204,6 +241,7 @@ class MultiplayerClient {
         }
         store.setRemotePlayers(remotes);
         store.setVehicles(payload.vehicles);
+        if (payload.publicBus) store.setPublicBus(payload.publicBus);
 
         const existingProps = { ...store.worldProperties };
         for (const prop of payload.properties) {
@@ -213,24 +251,31 @@ class MultiplayerClient {
 
         if (Array.isArray(payload.customHomes)) {
           const mergedHomes = { ...store.customHomes };
-          for (const h of payload.customHomes) {
-            mergedHomes[h.homeId] = h;
-          }
+          for (const h of payload.customHomes) mergedHomes[h.homeId] = h;
           store.setCustomHomes(mergedHomes);
         }
 
         if (Array.isArray(payload.customShops)) {
           const mergedShops = { ...store.customShops };
-          for (const sh of payload.customShops) {
-            mergedShops[sh.shopId] = sh;
-          }
+          for (const sh of payload.customShops) mergedShops[sh.shopId] = sh;
           store.setCustomShops(mergedShops);
         }
 
+        if (Array.isArray(payload.publicAds)) {
+          store.setPublicAds(payload.publicAds);
+        }
+        if (Array.isArray(payload.palaceVillas)) {
+          store.setPalaceVillas(payload.palaceVillas);
+        }
+        if (Array.isArray(payload.typixelUpdates)) {
+          store.setTypixelUpdates(payload.typixelUpdates);
+        }
+        if (Array.isArray(payload.sportsBalls)) {
+          store.setSportsBalls(payload.sportsBalls);
+        }
         if (payload.mingleEvent) {
           store.setMingleEvent(payload.mingleEvent);
         }
-
         if (Array.isArray(payload.voicePeers) && payload.voicePeers.length > 0) {
           voiceChat.handleVoicePeers(payload.voicePeers);
         }
@@ -239,18 +284,136 @@ class MultiplayerClient {
 
     socket.on(
       'world:snapshot',
-      (payload: { players: NetworkPlayer[]; vehicles: VehicleState[] }) => {
-        const myUid = useGameStore.getState().firebaseUser?.uid;
+      (payload: {
+        players: NetworkPlayer[];
+        vehicles: VehicleState[];
+        publicBus?: PublicBusState;
+        sportsBalls?: SportsBallState[];
+      }) => {
+        const store = useGameStore.getState();
+        const myUid = store.firebaseUser?.uid;
         const remotes: Record<string, NetworkPlayer> = {};
         for (const p of payload.players) {
           if (p.uid !== myUid) {
             remotes[p.uid] = p;
           }
         }
-        useGameStore.getState().setRemotePlayers(remotes);
-        useGameStore.getState().setVehicles(payload.vehicles);
+        store.setRemotePlayers(remotes);
+        store.setVehicles(payload.vehicles);
+        if (payload.publicBus) store.setPublicBus(payload.publicBus);
+        if (Array.isArray(payload.sportsBalls)) store.setSportsBalls(payload.sportsBalls);
       },
     );
+
+    socket.on('bus:update', (bus: PublicBusState) => {
+      useGameStore.getState().setPublicBus(bus);
+    });
+
+    socket.on('village:config', (cfg: { halfSize: number }) => {
+      if (typeof cfg?.halfSize === 'number') {
+        useGameStore.getState().setVillageHalfSize(cfg.halfSize);
+        useGameStore
+          .getState()
+          .pushToast('Village Expanded!', `Green Valley boundary is now ±${cfg.halfSize}m.`, 'emerald');
+      }
+    });
+
+    socket.on('publicAd:created', (ad: PublicAdDef) => {
+      useGameStore.getState().prependPublicAd(ad);
+    });
+
+    socket.on('villa:updated', (villa: PalaceVillaDef) => {
+      useGameStore.getState().upsertPalaceVilla(villa);
+    });
+
+    socket.on(
+      'villa:accessUpdate',
+      (payload: {
+        villaId: string;
+        canVisitOutside?: boolean;
+        canEnterInside?: boolean;
+        teleportTo?: { x: number; y: number; z: number };
+      }) => {
+        const store = useGameStore.getState();
+        store.setVillaAccess(payload.villaId, {
+          ...(typeof payload.canVisitOutside === 'boolean'
+            ? { canVisitOutside: payload.canVisitOutside }
+            : {}),
+          ...(typeof payload.canEnterInside === 'boolean'
+            ? { canEnterInside: payload.canEnterInside }
+            : {}),
+        });
+        if (payload.teleportTo) {
+          store.requestTeleport(payload.teleportTo);
+          store.setActivePanel(null);
+        }
+      },
+    );
+
+    socket.on('phone:state', (call: PhoneCallState) => {
+      useGameStore.getState().setPhoneCall(call);
+      if (call.status === 'ringing_in') {
+        playSfx('alarm');
+        useGameStore
+          .getState()
+          .pushToast(`Incoming Call: ${call.peerName}`, 'Open Phone or tap Accept', 'sky');
+      }
+    });
+
+    socket.on('phone:ended', (payload: { reason?: string }) => {
+      useGameStore.getState().setPhoneCall(null);
+      if (payload?.reason) {
+        useGameStore.getState().pushToast('Call Ended', payload.reason, 'amber');
+      }
+    });
+
+    socket.on('typixel:update', (update: TypixelUpdateAlert) => {
+      const store = useGameStore.getState();
+      store.prependTypixelUpdate(update);
+      playSfx('chat');
+      store.pushToast(`Typixel Alert: ${update.title}`, update.message, 'amber');
+    });
+
+    socket.on(
+      'player:heldItem',
+      (payload: { uid: string; heldItem: HeldItemType; heldItemUntil: number }) => {
+        const store = useGameStore.getState();
+        if (payload.uid === store.firebaseUser?.uid) {
+          store.setLocalHeldItem(payload.heldItem, payload.heldItemUntil);
+          return;
+        }
+        const rp = store.remotePlayers[payload.uid];
+        if (rp) {
+          store.upsertRemotePlayer({
+            ...rp,
+            heldItem: payload.heldItem,
+            heldItemUntil: payload.heldItemUntil,
+          });
+        }
+      },
+    );
+
+    socket.on('shop:interiorUnlocked', (payload: { shopId: string }) => {
+      if (payload?.shopId) {
+        useGameStore.getState().markShopUnlocked(payload.shopId);
+        useGameStore
+          .getState()
+          .pushToast('Shop Interior Unlocked', 'Welcome behind the counter!', 'emerald');
+      }
+    });
+
+    socket.on('shop:keyChanged', (payload: { shopId: string; ownerKeyHash: string }) => {
+      if (payload?.shopId && payload?.ownerKeyHash) {
+        const shop = useGameStore.getState().customShops[payload.shopId];
+        if (shop) {
+          useGameStore.getState().upsertCustomShop({ ...shop, ownerKeyHash: payload.ownerKeyHash });
+        }
+        void updateCustomShopKeyHash(payload.shopId, payload.ownerKeyHash).catch(() => {});
+        useGameStore
+          .getState()
+          .pushToast('Shop Key Updated', 'Your new secret interior key is saved.', 'emerald');
+      }
+    });
 
     socket.on('player:joined', (player: NetworkPlayer) => {
       const myUid = useGameStore.getState().firebaseUser?.uid;
@@ -260,29 +423,10 @@ class MultiplayerClient {
       useGameStore
         .getState()
         .pushToast(`${player.displayName} joined Green Valley`, handleTag || undefined, 'sky');
-      useGameStore.getState().addChatMessage({
-        id: `sys_join_${player.uid}_${Date.now()}`,
-        uid: 'system',
-        displayName: 'Green Valley',
-        photoURL: '',
-        channel: 'system',
-        text: `${player.displayName}${handleTag} entered Green Valley.`,
-        timestamp: Date.now(),
-      });
     });
 
     socket.on('player:left', (payload: { uid: string; displayName: string }) => {
       useGameStore.getState().removeRemotePlayer(payload.uid);
-      useGameStore.getState().pushToast(`${payload.displayName} left Green Valley`, undefined, 'amber');
-      useGameStore.getState().addChatMessage({
-        id: `sys_left_${payload.uid}_${Date.now()}`,
-        uid: 'system',
-        displayName: 'Green Valley',
-        photoURL: '',
-        channel: 'system',
-        text: `${payload.displayName} left the valley.`,
-        timestamp: Date.now(),
-      });
     });
 
     socket.on(
@@ -406,26 +550,33 @@ class MultiplayerClient {
       }
     });
 
-    socket.on('mingle:alarm', (payload: { locationName: string; locationPos: { x: number; y: number; z: number }; nextEventAtMs: number }) => {
-      const store = useGameStore.getState();
-      store.patchMingleEvent({
-        alarmActive: true,
-        locationName: payload.locationName,
-        locationPos: payload.locationPos,
-        nextEventAtMs: payload.nextEventAtMs,
-      });
-      store.setWaypointTarget({
-        x: payload.locationPos.x,
-        z: payload.locationPos.z,
-        label: `Mingle: ${payload.locationName}`,
-      });
-      playSfx('alarm');
-      store.pushToast(
-        '5-Min Single-to-Mingle Alarm!',
-        `Head to ${payload.locationName} for hourly matchmaking!`,
-        'rose',
-      );
-    });
+    socket.on(
+      'mingle:alarm',
+      (payload: {
+        locationName: string;
+        locationPos: { x: number; y: number; z: number };
+        nextEventAtMs: number;
+      }) => {
+        const store = useGameStore.getState();
+        store.patchMingleEvent({
+          alarmActive: true,
+          locationName: payload.locationName,
+          locationPos: payload.locationPos,
+          nextEventAtMs: payload.nextEventAtMs,
+        });
+        store.setWaypointTarget({
+          x: payload.locationPos.x,
+          z: payload.locationPos.z,
+          label: `Mingle: ${payload.locationName}`,
+        });
+        playSfx('alarm');
+        store.pushToast(
+          'Single-to-Mingle Starting Soon!',
+          `Head to ${payload.locationName} for live matchmaking!`,
+          'rose',
+        );
+      },
+    );
 
     socket.on(
       'mingle:married',
@@ -447,8 +598,8 @@ class MultiplayerClient {
         }
         playSfx('wedding');
         store.pushToast(
-          `Congratulations! Married to ${payload.partnerName}!`,
-          'Enjoy the Grand Wedding Feast & Lakeside Honeymoon!',
+          `Married to ${payload.partnerName}!`,
+          'Free Wedding Feast served to everyone & Free Honeymoon unlocked!',
           'rose',
         );
         const updated = useGameStore.getState().profile;
@@ -495,6 +646,9 @@ class MultiplayerClient {
         greenCoins: number;
         xp: number;
         level: number;
+        muscleLevel?: number;
+        hasGameCenterCard?: boolean;
+        heldItem?: HeldItemType;
         ownedProperties?: string[];
         ownedBusinesses?: string[];
         ownedVehicles?: string[];
@@ -508,6 +662,7 @@ class MultiplayerClient {
         createdHome?: CustomHomeDef;
         createdShop?: CustomShopDef;
         updatedShop?: CustomShopDef;
+        createdPublicAd?: PublicAdDef;
         businessCooldown?: { businessId: string; readyAt: number };
         workCooldown?: { jobId: string; readyAt: number };
         completedWorkId?: string;
@@ -523,6 +678,9 @@ class MultiplayerClient {
           xp: payload.xp,
           level: payload.level,
         };
+        if (typeof payload.muscleLevel === 'number') patch.muscleLevel = payload.muscleLevel;
+        if (typeof payload.hasGameCenterCard === 'boolean')
+          patch.hasGameCenterCard = payload.hasGameCenterCard;
         if (payload.ownedProperties) patch.ownedProperties = payload.ownedProperties;
         if (payload.ownedBusinesses) patch.ownedBusinesses = payload.ownedBusinesses;
         if (payload.ownedVehicles) patch.ownedVehicles = payload.ownedVehicles;
@@ -538,6 +696,9 @@ class MultiplayerClient {
 
         store.patchProfile(patch);
 
+        if (payload.heldItem && payload.heldItem !== 'none') {
+          store.setLocalHeldItem(payload.heldItem, Date.now() + 9000);
+        }
         if (payload.businessCooldown) {
           store.setBusinessCooldown(
             payload.businessCooldown.businessId,
@@ -604,6 +765,10 @@ class MultiplayerClient {
             payload.updatedShop.totalSales,
           ).catch(() => {});
         }
+        if (payload.createdPublicAd) {
+          store.prependPublicAd(payload.createdPublicAd);
+          void savePublicAdToFirestore(payload.createdPublicAd).catch(() => {});
+        }
         const updatedProfile = useGameStore.getState().profile;
         if (updatedProfile) {
           void syncPlayerProgressToFirestore(updatedProfile).catch(() => {});
@@ -659,6 +824,11 @@ class MultiplayerClient {
     this.socket?.emit('player:emote', { emote });
   }
 
+  holdItem(item: HeldItemType): void {
+    useGameStore.getState().setLocalHeldItem(item, Date.now() + 9000);
+    this.socket?.emit('player:holdItem', { item });
+  }
+
   sendChat(text: string, channel: 'global' | 'proximity' | 'direct', targetUid?: string): void {
     if (this.socket?.connected) {
       this.socket.emit('chat:send', { text, channel, targetUid });
@@ -678,7 +848,7 @@ class MultiplayerClient {
     }
   }
 
-  // Daily Login Reward (works both online via Socket.IO AND with instant Firestore fallback)
+  // Weekly Reward (once per 7 days)
   claimDailyLogin(): void {
     if (this.socket?.connected) {
       this.socket.emit('daily:claim', {});
@@ -688,13 +858,17 @@ class MultiplayerClient {
     const profile = store.profile;
     if (!profile) return;
     const today = getTodayDateKey();
-    if (profile.lastDailyLoginDate === today) {
-      store.pushToast('Already Claimed Today', 'Come back tomorrow to continue your streak!', 'amber');
+    const daysSince = daysBetweenDateKeys(profile.lastDailyLoginDate, today);
+    if (daysSince < 7) {
+      const waitDays = Math.max(1, 7 - daysSince);
+      store.pushToast(
+        'Weekly Reward Cooldown',
+        `Claim once per week. Next reward unlocks in ${waitDays} day${waitDays > 1 ? 's' : ''}.`,
+        'amber',
+      );
       return;
     }
-    const yesterday = getYesterdayDateKey();
-    const nextStreak =
-      profile.lastDailyLoginDate === yesterday ? (profile.dailyLoginStreak || 0) + 1 : 1;
+    const nextStreak = daysSince <= 14 ? (profile.dailyLoginStreak || 0) + 1 : 1;
     const tier = DAILY_LOGIN_REWARDS[(nextStreak - 1) % DAILY_LOGIN_REWARDS.length];
     const nextCoins = Math.min(10000000, profile.greenCoins + tier.coins);
     const nextXp = profile.xp + tier.xp;
@@ -710,11 +884,11 @@ class MultiplayerClient {
       {
         type: 'earn',
         amount: tier.coins,
-        reason: `Daily Login Reward (Day ${nextStreak})`,
+        reason: `Weekly Login Reward (Week ${nextStreak})`,
         balanceAfter: nextCoins,
       },
       {
-        title: `Day ${nextStreak} Daily Reward: +${tier.coins} GC!`,
+        title: `Week ${nextStreak} Reward: +${tier.coins} GC!`,
         detail: `${tier.label} · +${tier.xp} XP`,
         tone: 'amber',
       },
@@ -726,7 +900,6 @@ class MultiplayerClient {
       this.socket.emit('vehicle:enter', { vehicleId, mode });
       return;
     }
-    // Offline-resilient fallback so players can ALWAYS spend coins & drive
     const store = useGameStore.getState();
     const profile = store.profile;
     const veh = store.vehicles[vehicleId];
@@ -743,7 +916,7 @@ class MultiplayerClient {
         this.applyLocalTransaction(
           { greenCoins: bal },
           { type: 'spend', amount: veh.rentPrice, reason: `Rented ${veh.name}`, balanceAfter: bal },
-          { title: `Rented ${veh.name}`, detail: `-${veh.rentPrice} GC · Enjoy the drive!`, tone: 'amber' },
+          { title: `Rented ${veh.name}`, detail: `-${veh.rentPrice} GC`, tone: 'amber' },
         );
       } else if (mode === 'buy') {
         if (profile.greenCoins < veh.buyPrice) {
@@ -780,6 +953,162 @@ class MultiplayerClient {
     playSfx('click');
   }
 
+  // Full-time KSRTC Public Bus & Conductor
+  becomeBusConductor(): void {
+    this.socket?.emit('bus:becomeConductor', {});
+  }
+  leaveBusConductor(): void {
+    this.socket?.emit('bus:leaveConductor', {});
+  }
+  boardPublicBus(): void {
+    this.socket?.emit('bus:board', {});
+  }
+  leavePublicBus(): void {
+    this.socket?.emit('bus:leave', {});
+  }
+  payBusFare(): void {
+    this.socket?.emit('bus:payFare', {});
+  }
+  issueBusTicket(passengerUid: string): void {
+    this.socket?.emit('bus:issueTicket', { passengerUid });
+  }
+
+  // Public Ad Center
+  publishPublicAd(opts: {
+    title: string;
+    subtitle: string;
+    instagramHandle: string;
+    accentColor: string;
+  }): void {
+    if (this.socket?.connected) {
+      this.socket.emit('ad:publish', opts);
+      return;
+    }
+    const store = useGameStore.getState();
+    const profile = store.profile;
+    if (!profile) return;
+    const cost = store.isAdmin ? 0 : 200;
+    if (cost > 0 && profile.greenCoins < cost) {
+      store.pushToast('Insufficient Coins', 'Need 200 GC to publish a public ad.', 'rose');
+      return;
+    }
+    const ad: PublicAdDef = {
+      adId: `ad_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+      title: opts.title.trim().slice(0, 42) || 'Green Valley Promo',
+      subtitle: opts.subtitle.trim().slice(0, 96) || 'Visit us today!',
+      instagramHandle: opts.instagramHandle.replace(/^@+/, '').slice(0, 30),
+      accentColor: opts.accentColor || '#10b981',
+      ownerUid: profile.uid,
+      ownerName: profile.displayName,
+      createdAtMs: Date.now(),
+    };
+    const bal = profile.greenCoins - cost;
+    store.prependPublicAd(ad);
+    void savePublicAdToFirestore(ad).catch(() => {});
+    this.applyLocalTransaction(
+      { greenCoins: bal },
+      cost > 0 ? { type: 'spend', amount: cost, reason: `Published Ad: ${ad.title}`, balanceAfter: bal } : undefined,
+      { title: 'Ad Published!', detail: ad.title, tone: 'emerald' },
+    );
+  }
+
+  // Palace Villas (Hashim's Villa & Rifad's Villa)
+  visitVillaOutside(villaId: 'hashim_villa' | 'rifad_villa'): void {
+    this.socket?.emit('villa:visitOutside', { villaId });
+  }
+  unlockVillaHouse(villaId: 'hashim_villa' | 'rifad_villa', key: string): void {
+    this.socket?.emit('villa:unlockHouse', { villaId, key });
+  }
+  updateVillaConfig(
+    villaId: 'hashim_villa' | 'rifad_villa',
+    opts: { boardName?: string; newKey?: string; visitFee?: number },
+  ): void {
+    this.socket?.emit('villa:updateConfig', { villaId, ...opts });
+  }
+
+  // Personal Smartphone Calls & Typixel Admin Alerts
+  callPlayer(targetUid: string): void {
+    this.socket?.emit('phone:call', { targetUid });
+  }
+  acceptCall(callId: string): void {
+    this.socket?.emit('phone:accept', { callId });
+  }
+  declineCall(callId: string): void {
+    this.socket?.emit('phone:decline', { callId });
+  }
+  endCall(): void {
+    this.socket?.emit('phone:end', {});
+    useGameStore.getState().setPhoneCall(null);
+  }
+  adminPublishUpdate(title: string, message: string): void {
+    this.socket?.emit('admin:publishUpdate', { title, message });
+  }
+  adminExpandVillage(halfSize: number): void {
+    this.socket?.emit('admin:expandVillage', { halfSize });
+  }
+  adminUpdateShopSpace(shopId: string, opts: { x?: number; z?: number; sizeTier?: ShopSizeTier }): void {
+    this.socket?.emit('admin:updateShopSpace', { shopId, ...opts });
+  }
+
+  // Playable 3D Sports & Grand Game Center
+  kickSportsBall(ballId: 'football' | 'volleyball', dirX: number, dirZ: number, power = 18): void {
+    this.socket?.emit('sports:kick', { ballId, dirX, dirZ, power });
+  }
+
+  collectHiddenGameCard(): void {
+    if (this.socket?.connected) {
+      this.socket.emit('gameCenter:collectCard', {});
+      return;
+    }
+    const store = useGameStore.getState();
+    if (!store.profile || store.profile.hasGameCenterCard) return;
+    this.applyLocalTransaction(
+      { hasGameCenterCard: true, xp: store.profile.xp + 250, level: levelFromXp(store.profile.xp + 250) },
+      undefined,
+      {
+        title: 'VIP Game Center Card Found!',
+        detail: 'You conquered Danger Peak Cliff and unlocked all 54 Arcade Games!',
+        tone: 'amber',
+      },
+    );
+  }
+
+  playGameCenterGame(gameId: string, won: boolean): void {
+    if (this.socket?.connected) {
+      this.socket.emit('gameCenter:play', { gameId, won });
+      return;
+    }
+    const store = useGameStore.getState();
+    const profile = store.profile;
+    const game = GAME_CENTER_GAMES.find((g) => g.id === gameId);
+    if (!profile || !game) return;
+    if (!profile.hasGameCenterCard && !store.isAdmin) {
+      store.pushToast('Entrance Card Needed', 'Find the hidden VIP Card on Danger Peak Cliff first!', 'rose');
+      return;
+    }
+    const fee = store.isAdmin ? 0 : game.entryFee;
+    if (fee > 0 && profile.greenCoins < fee) {
+      store.pushToast('Insufficient Coins', `Need ${fee} GC to play ${game.title}.`, 'rose');
+      return;
+    }
+    const prize = won ? game.winPrize : 0;
+    const bal = Math.min(10000000, profile.greenCoins - fee + prize);
+    const nextXp = profile.xp + (won ? 40 : 12);
+    this.applyLocalTransaction(
+      { greenCoins: bal, xp: nextXp, level: levelFromXp(nextXp) },
+      prize > fee
+        ? { type: 'earn', amount: prize - fee, reason: `Won ${game.title}`, balanceAfter: bal }
+        : fee > 0
+          ? { type: 'spend', amount: fee, reason: `Played ${game.title}`, balanceAfter: bal }
+          : undefined,
+      {
+        title: won ? `Victory in ${game.title}!` : `Played ${game.title}`,
+        detail: won ? `+${prize} GC prize!` : 'Try again!',
+        tone: won ? 'amber' : 'sky',
+      },
+    );
+  }
+
   completeMission(missionId: string): void {
     this.socket?.emit('mission:complete', { missionId });
   }
@@ -793,7 +1122,6 @@ class MultiplayerClient {
       this.socket.emit('reward:claim', { rewardId });
       return;
     }
-    // Resilient fallback so Claim Reward NEVER fails silently!
     const store = useGameStore.getState();
     const profile = store.profile;
     const reward = REWARDS.find((r) => r.id === rewardId);
@@ -801,35 +1129,13 @@ class MultiplayerClient {
     const now = Date.now();
     if (reward.repeatableSec) {
       if (now < store.dailyRewardReadyAt) {
-        const secs = Math.ceil((store.dailyRewardReadyAt - now) / 1000);
-        store.pushToast('Cooldown Active', `Next check-in ready in ${secs}s.`, 'amber');
+        store.pushToast('Weekly Cooldown Active', 'You can claim this reward once per week.', 'amber');
         return;
       }
       store.setDailyRewardReadyAt(now + reward.repeatableSec * 1000);
-    } else {
-      if (profile.claimedRewards.includes(reward.id)) {
-        store.pushToast('Already Claimed', 'You already claimed this milestone.', 'amber');
-        return;
-      }
-      if (reward.id === 'rew-insta-profile' && profile.instagramId.length < 2) {
-        store.pushToast('Add Instagram ID', 'Add your Instagram username in Customize first.', 'rose');
-        return;
-      }
-      if (reward.id === 'rew-first-home') {
-        const ownsCustom = Object.values(store.customHomes).some((h) => h.ownerUid === profile.uid);
-        if (profile.ownedProperties.length === 0 && !ownsCustom) {
-          store.pushToast('Home Required', 'Buy or build your first home first.', 'rose');
-          return;
-        }
-      }
-      if (reward.id === 'rew-vehicle-owner' && profile.ownedVehicles.length === 0) {
-        store.pushToast('Vehicle Required', 'Unlock any paid vehicle permanently first.', 'rose');
-        return;
-      }
-      if (reward.id === 'rew-mission-ace' && profile.completedMissions.length < 2) {
-        store.pushToast('Missions Required', 'Complete at least 2 missions first.', 'rose');
-        return;
-      }
+    } else if (profile.claimedRewards.includes(reward.id)) {
+      store.pushToast('Already Claimed', 'You already claimed this milestone.', 'amber');
+      return;
     }
     const nextCoins = Math.min(10000000, profile.greenCoins + reward.coins);
     const nextXp = profile.xp + reward.xp;
@@ -842,17 +1148,8 @@ class MultiplayerClient {
           ? profile.claimedRewards
           : [...profile.claimedRewards, reward.id],
       },
-      {
-        type: 'earn',
-        amount: reward.coins,
-        reason: `Reward: ${reward.title}`,
-        balanceAfter: nextCoins,
-      },
-      {
-        title: `Reward Claimed: +${reward.coins} GC`,
-        detail: `${reward.title} · +${reward.xp} XP`,
-        tone: 'amber',
-      },
+      { type: 'earn', amount: reward.coins, reason: `Reward: ${reward.title}`, balanceAfter: nextCoins },
+      { title: `Reward Claimed: +${reward.coins} GC`, detail: reward.title, tone: 'amber' },
     );
   }
 
@@ -862,11 +1159,19 @@ class MultiplayerClient {
     wallColor: string;
     roofColor: string;
     hasPool: boolean;
+    hasGarden?: boolean;
+    hasAc?: boolean;
     interiorTheme: InteriorTheme;
     gardenStyle: GardenStyle;
     x: number;
     z: number;
   }): void {
+    if (isPositionOnRoad(opts.x, opts.z, 10)) {
+      useGameStore
+        .getState()
+        .pushToast('Blocked: Road Area', 'Cannot build on a road! Pick a clear green plot.', 'rose');
+      return;
+    }
     if (this.socket?.connected) {
       this.socket.emit('home:build', opts);
       return;
@@ -875,7 +1180,12 @@ class MultiplayerClient {
     const profile = store.profile;
     const plan = CUSTOM_HOME_PLANS.find((p) => p.style === opts.style);
     if (!profile || !plan) return;
-    const cost = store.isAdmin ? 0 : plan.price;
+    const totalPrice = computeHouseTotalPrice(opts.style, {
+      hasPool: opts.hasPool,
+      hasGarden: Boolean(opts.hasGarden),
+      hasAc: Boolean(opts.hasAc),
+    });
+    const cost = store.isAdmin ? 0 : totalPrice;
     if (cost > 0 && profile.greenCoins < cost) {
       store.pushToast('Insufficient Coins', `Need ${cost} GC to build ${plan.label}.`, 'rose');
       return;
@@ -893,6 +1203,8 @@ class MultiplayerClient {
       wallColor: opts.wallColor,
       roofColor: opts.roofColor,
       hasPool: opts.hasPool,
+      hasGarden: Boolean(opts.hasGarden),
+      hasAc: Boolean(opts.hasAc),
       interiorTheme: opts.interiorTheme,
       gardenStyle: opts.gardenStyle,
       x: Number(opts.x.toFixed(1)),
@@ -911,14 +1223,23 @@ class MultiplayerClient {
     );
   }
 
-  // Anyone can open a 3D Shop (Tea Stall / Chaya Kada, Juice Bar, Bakery, Boutique, Tech Shop)
   openCustomShop(opts: {
     name: string;
     shopType: CustomShopType;
+    sizeTier?: ShopSizeTier;
+    hasSeating?: boolean;
+    hasAc?: boolean;
     awningColor: string;
+    ownerKey: string;
     x: number;
     z: number;
   }): void {
+    if (isPositionOnRoad(opts.x, opts.z, 9)) {
+      useGameStore
+        .getState()
+        .pushToast('Blocked: Road Area', 'Cannot place a shop on a road! Pick an off-road plot.', 'rose');
+      return;
+    }
     if (this.socket?.connected) {
       this.socket.emit('shop:open', opts);
       return;
@@ -927,7 +1248,12 @@ class MultiplayerClient {
     const profile = store.profile;
     const plan = CUSTOM_SHOP_PLANS.find((p) => p.shopType === opts.shopType);
     if (!profile || !plan) return;
-    const cost = store.isAdmin ? 0 : plan.price;
+    const tier = opts.sizeTier || 'small';
+    const totalPrice = computeShopTotalPrice(plan.price, tier, {
+      hasSeating: Boolean(opts.hasSeating),
+      hasAc: Boolean(opts.hasAc),
+    });
+    const cost = store.isAdmin ? 0 : totalPrice;
     if (cost > 0 && profile.greenCoins < cost) {
       store.pushToast('Insufficient Coins', `Need ${cost} GC to start ${plan.label}.`, 'rose');
       return;
@@ -938,6 +1264,9 @@ class MultiplayerClient {
       shopId,
       name: opts.name.trim().slice(0, 32) || `${profile.displayName}'s ${plan.label}`,
       shopType: opts.shopType,
+      sizeTier: tier,
+      hasSeating: Boolean(opts.hasSeating),
+      hasAc: Boolean(opts.hasAc),
       ownerUid: profile.uid,
       ownerName: profile.displayName,
       ownerInstagram: profile.instagramId,
@@ -963,6 +1292,14 @@ class MultiplayerClient {
     );
   }
 
+  unlockShopInterior(shopId: string, ownerKey: string): void {
+    this.socket?.emit('shop:unlockInterior', { shopId, ownerKey });
+  }
+
+  changeShopKey(shopId: string, newKey: string): void {
+    this.socket?.emit('shop:changeKey', { shopId, newKey });
+  }
+
   buyFromCustomShop(shopId: string, menuItemId: string): void {
     if (this.socket?.connected) {
       this.socket.emit('shop:purchaseFromPlayer', { shopId, menuItemId });
@@ -984,6 +1321,9 @@ class MultiplayerClient {
     const nextXp = profile.xp + item.xp;
     const updatedShop = { ...shop, totalSales: shop.totalSales + 1 };
     store.upsertCustomShop(updatedShop);
+    if (item.heldItem && item.heldItem !== 'none') {
+      store.setLocalHeldItem(item.heldItem, Date.now() + 9000);
+    }
     void incrementCustomShopSales(shop.shopId, updatedShop.totalSales).catch(() => {});
     this.applyLocalTransaction(
       { greenCoins: nextCoins, xp: nextXp, level: levelFromXp(nextXp) },
@@ -1034,12 +1374,16 @@ class MultiplayerClient {
     const gain = svc.rewardCoins || 0;
     const nextCoins = Math.min(10000000, profile.greenCoins - cost + gain);
     const nextXp = profile.xp + (svc.rewardXp || 0);
+    const nextMuscle = Math.min(10, (profile.muscleLevel || 0) + (svc.muscleGain || 0));
+    if (svc.heldItem && svc.heldItem !== 'none') {
+      store.setLocalHeldItem(svc.heldItem, Date.now() + 9000);
+    }
     if (svc.teleportTo) {
       store.requestTeleport(svc.teleportTo);
       store.setActivePanel(null);
     }
     this.applyLocalTransaction(
-      { greenCoins: nextCoins, xp: nextXp, level: levelFromXp(nextXp) },
+      { greenCoins: nextCoins, xp: nextXp, level: levelFromXp(nextXp), muscleLevel: nextMuscle },
       cost > 0
         ? { type: 'spend', amount: cost, reason: `${bldg.name}: ${svc.label}`, balanceAfter: nextCoins }
         : gain > 0
@@ -1050,8 +1394,8 @@ class MultiplayerClient {
         detail:
           gain > 0
             ? `+${gain} GC${svc.rewardXp ? ` · +${svc.rewardXp} XP` : ''}`
-            : svc.teleportLabel
-              ? `Arriving at ${svc.teleportLabel}`
+            : svc.muscleGain
+              ? `Muscle Level ${nextMuscle}/10!`
               : svc.healthRestore
                 ? `Health restored (+${svc.healthRestore} HP)`
                 : bldg.name,
@@ -1061,7 +1405,7 @@ class MultiplayerClient {
     );
   }
 
-  // Free Single-to-Mingle Actions (0 GC — No Money Needed, Live Joined Pool + Auto-Select 2 Accounts + DPs)
+  // Free Single-to-Mingle Actions (Max 5-min timer + Admin Reset)
   joinMingle(): void {
     if (this.socket?.connected) {
       this.socket.emit('mingle:join', {});
@@ -1110,6 +1454,17 @@ class MultiplayerClient {
     this.triggerMingleDemo('match');
   }
 
+  adminResetMingleTimer(): void {
+    if (this.socket?.connected) {
+      this.socket.emit('mingle:adminReset', {});
+      return;
+    }
+    useGameStore.getState().patchMingleEvent({
+      nextEventAtMs: Date.now() + 5 * 60 * 1000,
+      alarmActive: false,
+    });
+  }
+
   triggerMingleDemo(mode: 'alarm' | 'match'): void {
     if (this.socket?.connected) {
       this.socket.emit('mingle:triggerDemo', { mode });
@@ -1144,97 +1499,68 @@ class MultiplayerClient {
         isOnline: true,
         isNpc: false,
       };
-      const remoteList: MingleParticipant[] = Object.values(store.remotePlayers).map((rp) => ({
-        uid: rp.uid,
-        displayName: rp.displayName,
-        instagramId: rp.instagramId,
-        photoURL: rp.photoURL,
-        age: rp.age || 22,
-        gender: rp.appearance.gender,
-        relationshipStatus: rp.relationshipStatus || 'single',
-        appearance: rp.appearance,
+      const wantedGender = profile.appearance.gender === 'male' ? 'female' : 'male';
+      const candidates = VALLEY_SINGLES.filter((n) => n.gender === wantedGender);
+      const pick = candidates[Math.floor(Math.random() * candidates.length)] || VALLEY_SINGLES[0];
+      const memberB: MingleParticipant = {
+        uid: pick.uid,
+        displayName: pick.name,
+        instagramId: pick.instagram,
+        photoURL: '',
+        age: pick.age,
+        gender: pick.gender,
+        relationshipStatus: 'single',
+        appearance: {
+          gender: pick.gender,
+          skinTone: pick.skinTone,
+          hairStyle: pick.hairStyle,
+          hairColor: pick.hairColor,
+          shirtStyle: pick.shirtStyle,
+          shirtColor: pick.shirtColor,
+          pantsColor: pick.gender === 'female' ? '#fda4af' : '#1e293b',
+          shoeColor: '#f8fafc',
+          accessory: 'none',
+        },
         joinedAt: Date.now(),
         isOnline: true,
-        isNpc: false,
-      }));
-      const allJoined = [selfPart, ...remoteList];
+        isNpc: true,
+      };
       const matchId = `match_${Date.now()}`;
-
-      let memberA = selfPart;
-      let memberB: MingleParticipant;
-      if (allJoined.length >= 2) {
-        const shuffled = [...allJoined].sort(() => Math.random() - 0.5);
-        memberA = shuffled[0];
-        memberB = shuffled[1];
-      } else {
-        const wantedGender = profile.appearance.gender === 'male' ? 'female' : 'male';
-        const candidates = VALLEY_SINGLES.filter((n) => n.gender === wantedGender);
-        const pick = candidates[Math.floor(Math.random() * candidates.length)] || VALLEY_SINGLES[0];
-        memberB = {
-          uid: pick.uid,
-          displayName: pick.name,
-          instagramId: pick.instagram,
-          photoURL: '',
-          age: pick.age,
-          gender: pick.gender,
-          relationshipStatus: 'single',
-          appearance: {
-            gender: pick.gender,
-            skinTone: pick.skinTone,
-            hairStyle: pick.hairStyle,
-            hairColor: pick.hairColor,
-            shirtStyle: pick.shirtStyle,
-            shirtColor: pick.shirtColor,
-            pantsColor: pick.gender === 'female' ? '#fda4af' : '#1e293b',
-            shoeColor: '#f8fafc',
-            accessory: 'none',
-          },
-          joinedAt: Date.now(),
-          isOnline: true,
-          isNpc: true,
-        };
-      }
-
-      const partner = memberA.uid === profile.uid ? memberB : memberA;
       store.setMingleEvent({
-        nextEventAtMs: Date.now() + 3600000,
+        nextEventAtMs: Date.now() + 5 * 60 * 1000,
+        maxRoundDurationMs: 5 * 60 * 1000,
         alarmActive: false,
         locationName: loc.name,
         locationPos: loc.pos,
         isJoined: true,
-        joinedAccounts: allJoined,
+        joinedAccounts: [selfPart],
         selectedPair: {
           matchId,
-          memberA,
+          memberA: selfPart,
           memberB,
           selectedAt: Date.now(),
           locationName: loc.name,
           locationPos: loc.pos,
           status: 'proposed',
           memberAAccepted: false,
-          memberBAccepted: Boolean(memberB.isNpc),
+          memberBAccepted: true,
         },
         activeMatch: {
           matchId,
-          partnerUid: partner.uid,
-          partnerName: partner.displayName,
-          partnerInstagram: partner.instagramId,
-          partnerPhotoURL: partner.photoURL,
-          partnerAppearance: partner.appearance,
-          partnerAge: partner.age,
-          partnerGender: partner.gender,
-          isNpcPartner: Boolean(partner.isNpc),
+          partnerUid: memberB.uid,
+          partnerName: memberB.displayName,
+          partnerInstagram: memberB.instagramId,
+          partnerPhotoURL: memberB.photoURL,
+          partnerAppearance: memberB.appearance,
+          partnerAge: memberB.age,
+          partnerGender: memberB.gender,
+          isNpcPartner: true,
           myAccepted: false,
-          partnerAccepted: Boolean(partner.isNpc),
+          partnerAccepted: true,
           status: 'proposed',
         },
       });
       playSfx('alarm');
-      store.pushToast(
-        '2 Accounts Auto-Selected (FREE)!',
-        `${memberA.displayName} ♥ ${memberB.displayName} — DPs revealed!`,
-        'rose',
-      );
     }
   }
 
@@ -1249,7 +1575,7 @@ class MultiplayerClient {
     if (!profile || !match) return;
     if (!accept) {
       store.patchMingleEvent({ activeMatch: null, selectedPair: null });
-      store.pushToast('Match Declined', 'You remain Single for the next free round.', 'amber');
+      store.pushToast('Match Declined', 'Selecting next participant of same gender.', 'amber');
       return;
     }
     const nextXp = profile.xp + 200;
@@ -1273,7 +1599,7 @@ class MultiplayerClient {
       undefined,
       {
         title: `Married to ${match.partnerName}!`,
-        detail: '100% FREE Royal Wedding & Free Honeymoon Unlocked!',
+        detail: 'Free Wedding Feast & Free Lakeside Honeymoon Unlocked!',
         tone: 'rose',
       },
     );
@@ -1294,13 +1620,14 @@ class MultiplayerClient {
       activeMatch: { ...match, feastServed: true },
       selectedPair: prevPair ? { ...prevPair, feastServed: true } : null,
     });
+    store.setLocalHeldItem('snack', Date.now() + 9000);
     const nextXp = profile.xp + 120;
     this.applyLocalTransaction(
       { xp: nextXp, level: levelFromXp(nextXp) },
       undefined,
       {
-        title: 'Free Grand Wedding Feast Served!',
-        detail: 'Complimentary Kerala Sadhya, Biryani, Payasam & Cake (+100 HP · +120 XP)',
+        title: 'Free Grand Wedding Feast Served to All!',
+        detail: 'Kerala Sadhya, Biryani & Payasam (+100 HP · +120 XP)',
         tone: 'amber',
       },
       100,
@@ -1330,7 +1657,7 @@ class MultiplayerClient {
       undefined,
       {
         title: 'Free Lakeside Honeymoon Resort!',
-        detail: `Complimentary Golden Sunset Retreat with ${match.partnerName} ♥ (0 GC)`,
+        detail: `Golden Sunset Retreat with ${match.partnerName} ♥`,
         tone: 'rose',
       },
       100,
@@ -1346,11 +1673,19 @@ class MultiplayerClient {
     wallColor: string;
     roofColor: string;
     hasPool: boolean;
+    hasGarden?: boolean;
+    hasAc?: boolean;
     interiorTheme: InteriorTheme;
     gardenStyle: GardenStyle;
     x: number;
     z: number;
   }): void {
+    if (isPositionOnRoad(opts.x, opts.z, 10)) {
+      useGameStore
+        .getState()
+        .pushToast('Blocked: Road Area', 'Cannot build on a road! Pick a clear off-road plot.', 'rose');
+      return;
+    }
     this.socket?.emit('admin:buildHome', opts);
   }
 
@@ -1489,6 +1824,12 @@ class MultiplayerClient {
     if (idx === -1) return;
     const nextInv = [...profile.inventory];
     nextInv.splice(idx, 1);
+    const holdMap: Record<string, HeldItemType> = {
+      'item-matcha': 'latte',
+      'item-smoothie': 'juice',
+      'item-picnic': 'snack',
+    };
+    if (holdMap[itemId]) store.setLocalHeldItem(holdMap[itemId], Date.now() + 9000);
     this.applyLocalTransaction(
       { inventory: nextInv },
       undefined,

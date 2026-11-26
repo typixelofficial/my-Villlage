@@ -38,7 +38,9 @@ import type {
   GardenStyle,
   InteriorTheme,
   PlayerProfile,
+  PublicAdDef,
   RelationshipStatus,
+  ShopSizeTier,
   WalletTransaction,
   WorldPropertyOwnership,
 } from '../shared/types.ts';
@@ -208,8 +210,8 @@ function sanitizeLocations(raw: unknown): CustomLocationPin[] {
       category: (validCats.has(String(item.category))
         ? String(item.category)
         : 'favorite') as CustomLocationPin['category'],
-      x: Math.max(-450, Math.min(450, Number(item.x) || 0)),
-      z: Math.max(-450, Math.min(450, Number(item.z) || 0)),
+      x: Math.max(-950, Math.min(950, Number(item.x) || 0)),
+      z: Math.max(-950, Math.min(950, Number(item.z) || 0)),
     }));
 }
 
@@ -238,6 +240,8 @@ export async function loadPlayerProfile(uid: string): Promise<PlayerProfile | nu
       totalDailyLogins: typeof d.totalDailyLogins === 'number' ? d.totalDailyLogins : 0,
       followedOfficial: Boolean(d.followedOfficial ?? true),
       followedStudio: Boolean(d.followedStudio ?? true),
+      muscleLevel: typeof d.muscleLevel === 'number' ? Math.max(0, Math.min(10, Math.round(d.muscleLevel))) : 0,
+      hasGameCenterCard: Boolean(d.hasGameCenterCard),
       customLocations: sanitizeLocations(d.customLocations),
       appearance: {
         ...DEFAULT_APPEARANCE,
@@ -379,6 +383,8 @@ export async function createPlayerProfile(
     totalDailyLogins: 0,
     followedOfficial,
     followedStudio,
+    muscleLevel: 0,
+    hasGameCenterCard: false,
     customLocations: [],
     appearance: safeAppearance,
     greenCoins: 1500,
@@ -451,6 +457,8 @@ export async function createPlayerProfile(
     totalDailyLogins: 0,
     followedOfficial,
     followedStudio,
+    muscleLevel: 0,
+    hasGameCenterCard: false,
     customLocations: [],
     appearance: safeAppearance,
     greenCoins: 1500,
@@ -517,11 +525,13 @@ export async function syncPlayerProgressToFirestore(profile: PlayerProfile): Pro
       partnerUid: (profile.partnerUid || '').slice(0, 128),
       partnerName: (profile.partnerName || '').slice(0, 32),
       partnerInstagram: sanitizeInstagramId(profile.partnerInstagram || ''),
+      muscleLevel: Math.max(0, Math.min(10, Math.round(profile.muscleLevel || 0))),
+      hasGameCenterCard: Boolean(profile.hasGameCenterCard),
       customLocations: sanitizeLocations(profile.customLocations),
       lastPosition: {
-        x: Math.max(-500, Math.min(500, Number(profile.lastPosition.x.toFixed(2)))),
+        x: Math.max(-950, Math.min(950, Number(profile.lastPosition.x.toFixed(2)))),
         y: Math.max(-50, Math.min(300, Number(profile.lastPosition.y.toFixed(2)))),
-        z: Math.max(-500, Math.min(500, Number(profile.lastPosition.z.toFixed(2)))),
+        z: Math.max(-950, Math.min(950, Number(profile.lastPosition.z.toFixed(2)))),
       },
       updatedAt: serverTimestamp(),
     });
@@ -667,6 +677,8 @@ export async function loadCustomHomes(): Promise<Record<string, CustomHomeDef>> 
         wallColor: String(d.wallColor || '#ece6da'),
         roofColor: String(d.roofColor || '#2c3e50'),
         hasPool: Boolean(d.hasPool),
+        hasGarden: Boolean(d.hasGarden),
+        hasAc: Boolean(d.hasAc),
         interiorTheme: (d.interiorTheme as InteriorTheme) || 'modern',
         gardenStyle: (d.gardenStyle as GardenStyle) || 'flowers',
         x: Number(d.x || 0),
@@ -694,11 +706,13 @@ export async function saveCustomHomeToFirestore(home: CustomHomeDef): Promise<vo
       wallColor: home.wallColor,
       roofColor: home.roofColor,
       hasPool: home.hasPool,
+      hasGarden: Boolean(home.hasGarden),
+      hasAc: Boolean(home.hasAc),
       interiorTheme: home.interiorTheme,
       gardenStyle: home.gardenStyle,
-      x: Number(home.x.toFixed(2)),
+      x: Math.max(-950, Math.min(950, Number(home.x.toFixed(2)))),
       y: Number(home.y.toFixed(2)),
-      z: Number(home.z.toFixed(2)),
+      z: Math.max(-950, Math.min(950, Number(home.z.toFixed(2)))),
       isPublic: true,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
@@ -729,10 +743,14 @@ export async function loadCustomShops(): Promise<Record<string, CustomShopDef>> 
         shopId: docSnap.id,
         name: String(d.name || 'Valley Chaya Kada'),
         shopType: (d.shopType as CustomShopType) || 'tea_stall',
+        sizeTier: (d.sizeTier as ShopSizeTier) || 'small',
+        hasSeating: Boolean(d.hasSeating),
+        hasAc: Boolean(d.hasAc),
         ownerUid: String(d.ownerUid || ''),
         ownerName: String(d.ownerName || 'Shopkeeper'),
         ownerInstagram: sanitizeInstagramId(String(d.ownerInstagram || '')),
         awningColor: String(d.awningColor || '#e11d48'),
+        ownerKeyHash: typeof d.ownerKeyHash === 'string' ? d.ownerKeyHash : undefined,
         x: Number(d.x || 0),
         y: Number(d.y || 0),
         z: Number(d.z || 0),
@@ -752,13 +770,17 @@ export async function saveCustomShopToFirestore(shop: CustomShopDef): Promise<vo
       shopId: shop.shopId,
       name: shop.name.replace(/[^a-zA-Z0-9 _\-]/g, '').trim().slice(0, 32) || 'Valley Tea Stall',
       shopType: shop.shopType,
+      sizeTier: shop.sizeTier || 'small',
+      hasSeating: Boolean(shop.hasSeating),
+      hasAc: Boolean(shop.hasAc),
       ownerUid: shop.ownerUid,
       ownerName: sanitizeDisplayName(shop.ownerName),
       ownerInstagram: sanitizeInstagramId(shop.ownerInstagram),
       awningColor: shop.awningColor,
-      x: Number(shop.x.toFixed(2)),
+      ownerKeyHash: (shop.ownerKeyHash || '').slice(0, 128),
+      x: Math.max(-950, Math.min(950, Number(shop.x.toFixed(2)))),
       y: Number(shop.y.toFixed(2)),
-      z: Number(shop.z.toFixed(2)),
+      z: Math.max(-950, Math.min(950, Number(shop.z.toFixed(2)))),
       totalSales: Math.max(0, Math.round(shop.totalSales || 0)),
       isPublic: true,
       createdAt: serverTimestamp(),
@@ -781,12 +803,72 @@ export async function incrementCustomShopSales(shopId: string, nextTotal: number
   }
 }
 
+export async function updateCustomShopKeyHash(
+  shopId: string,
+  ownerKeyHash: string,
+): Promise<void> {
+  const path = `customShops/${shopId}`;
+  try {
+    await updateDoc(doc(db, 'customShops', shopId), {
+      ownerKeyHash: ownerKeyHash.slice(0, 128),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
 export async function deleteCustomShopFromFirestore(shopId: string): Promise<void> {
   const path = `customShops/${shopId}`;
   try {
     await deleteDoc(doc(db, 'customShops', shopId));
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
+export async function loadPublicAds(): Promise<PublicAdDef[]> {
+  const path = 'publicAds';
+  try {
+    const q = query(collection(db, 'publicAds'), where('isPublic', '==', true), limit(30));
+    const snap = await getDocs(q);
+    return snap.docs
+      .map((docSnap) => {
+        const d = docSnap.data();
+        const ts = d.createdAt?.toMillis ? d.createdAt.toMillis() : Date.now();
+        return {
+          adId: docSnap.id,
+          title: String(d.title || 'Green Valley Ad'),
+          subtitle: String(d.subtitle || ''),
+          instagramHandle: sanitizeInstagramId(String(d.instagramHandle || '')),
+          accentColor: String(d.accentColor || '#10b981'),
+          ownerUid: String(d.ownerUid || ''),
+          ownerName: String(d.ownerName || 'Citizen'),
+          createdAtMs: ts,
+        };
+      })
+      .sort((a, b) => b.createdAtMs - a.createdAtMs);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, path);
+  }
+}
+
+export async function savePublicAdToFirestore(ad: PublicAdDef): Promise<void> {
+  const path = `publicAds/${ad.adId}`;
+  try {
+    await setDoc(doc(db, 'publicAds', ad.adId), {
+      adId: ad.adId,
+      title: ad.title.trim().slice(0, 42) || 'Green Valley Ad',
+      subtitle: ad.subtitle.trim().slice(0, 96) || 'Visit us in Green Valley',
+      instagramHandle: sanitizeInstagramId(ad.instagramHandle || ''),
+      accentColor: sanitizeHexColor(ad.accentColor, '#10b981'),
+      ownerUid: ad.ownerUid,
+      ownerName: sanitizeDisplayName(ad.ownerName),
+      isPublic: true,
+      createdAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, path);
   }
 }
 

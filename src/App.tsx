@@ -1,12 +1,12 @@
-import { useEffect, useRef } from 'react';
+import { lazy, Suspense, useEffect, useRef } from 'react';
 import { onAuthStateChanged } from 'firebase/auth';
 import {
   auth,
   findMatchingHomeForPlayer,
-  getTodayDateKey,
   loadCustomHomes,
   loadCustomShops,
   loadPlayerProfile,
+  loadPublicAds,
   loadWalletTransactions,
   loadWorldProperties,
 } from './lib/firebase.ts';
@@ -15,11 +15,14 @@ import { useGameStore } from './store/gameStore.ts';
 import { ErrorBoundary } from './components/ErrorBoundary.tsx';
 import { LoginScreen } from './components/LoginScreen.tsx';
 import { CharacterCreator } from './components/CharacterCreator.tsx';
-import {
-  WorldViewport,
-  type MobileInputState,
-} from './components/WorldViewport.tsx';
-import { GameHUD } from './components/GameHUD.tsx';
+import type { MobileInputState } from './components/WorldViewport.tsx';
+
+const WorldViewport = lazy(() =>
+  import('./components/WorldViewport.tsx').then((m) => ({ default: m.WorldViewport })),
+);
+const GameHUD = lazy(() =>
+  import('./components/GameHUD.tsx').then((m) => ({ default: m.GameHUD })),
+);
 
 const BOOTSTRAPPED_ADMIN_EMAIL = 'hashimtypixel@gmail.com';
 
@@ -33,6 +36,7 @@ function GameShell() {
   const setWorldProperties = useGameStore((s) => s.setWorldProperties);
   const setCustomHomes = useGameStore((s) => s.setCustomHomes);
   const setCustomShops = useGameStore((s) => s.setCustomShops);
+  const setPublicAds = useGameStore((s) => s.setPublicAds);
   const setTransactions = useGameStore((s) => s.setTransactions);
   const setIsAdmin = useGameStore((s) => s.setIsAdmin);
   const resetForLogout = useGameStore((s) => s.resetForLogout);
@@ -45,6 +49,18 @@ function GameShell() {
   });
   const interactTriggerRef = useRef<(() => void) | null>(null);
 
+  // Instant Boot Failsafe: Never stay stuck on dark loading screen if Firebase takes > 2.5s
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const st = useGameStore.getState();
+      if (st.screen === 'loading' && !st.firebaseUser) {
+        st.setAuthUser(null, true);
+        st.setScreen('login');
+      }
+    }, 2500);
+    return () => window.clearTimeout(timer);
+  }, []);
+
   // Fast, Non-Blocking Firebase Session Hydration + Auto-Reach Home by UID/Instagram
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user) => {
@@ -56,10 +72,12 @@ function GameShell() {
       }
 
       setAuthUser(user, true);
-      setIsAdmin(user.email === BOOTSTRAPPED_ADMIN_EMAIL && user.emailVerified);
+      const hasAdminToken = Boolean(useGameStore.getState().adminBearerToken);
+      setIsAdmin(
+        hasAdminToken || (user.email === BOOTSTRAPPED_ADMIN_EMAIL && user.emailVerified),
+      );
 
       try {
-        // Fast path: only await player profile & custom homes so login completes rapidly!
         const [existingProfile, homesMap] = await Promise.all([
           loadPlayerProfile(user.uid),
           loadCustomHomes().catch(() => ({})),
@@ -67,7 +85,6 @@ function GameShell() {
         setCustomHomes(homesMap);
 
         if (existingProfile) {
-          // If player owns a home (self-built or Admin-built matching their UID or Instagram ID), spawn directly at their home!
           const matchedHome = findMatchingHomeForPlayer(existingProfile, homesMap);
           const spawnProfile = matchedHome
             ? {
@@ -92,25 +109,16 @@ function GameShell() {
               'emerald',
             );
           }
-
-          // Auto-show Daily Login Reward modal when today's bonus has not yet been claimed
-          if (spawnProfile.lastDailyLoginDate !== getTodayDateKey()) {
-            window.setTimeout(() => {
-              const st = useGameStore.getState();
-              if (st.screen === 'world' && !st.activePanel) {
-                st.setActivePanel('daily_reward');
-              }
-            }, 900);
-          }
         } else {
           setProfile(null);
           setScreen('character', false);
         }
 
-        // Hydrate secondary collections asynchronously in the background without blocking UI
+        // Hydrate secondary collections asynchronously without blocking 3D entry
         void Promise.all([
           loadWorldProperties().then(setWorldProperties).catch(() => {}),
           loadCustomShops().then(setCustomShops).catch(() => {}),
+          loadPublicAds().then(setPublicAds).catch(() => {}),
           loadWalletTransactions(user.uid).then(setTransactions).catch(() => {}),
         ]);
       } catch (err) {
@@ -128,6 +136,7 @@ function GameShell() {
     setAuthUser,
     setCustomHomes,
     setCustomShops,
+    setPublicAds,
     setProfile,
     setScreen,
     setTransactions,
@@ -145,6 +154,7 @@ function GameShell() {
       Object.values(st.worldProperties),
       Object.values(st.customHomes),
       Object.values(st.customShops),
+      st.publicAds,
     );
 
     return () => {
@@ -158,7 +168,7 @@ function GameShell() {
       <div className="w-full h-screen bg-[#0b1014] text-[#f4f7f5] flex flex-col items-center justify-center gap-3">
         <div className="w-8 h-8 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
         <p className="font-display text-sm font-medium text-slate-300">
-          Entering Green Valley...
+          Loading TYPIXEL Green Valley...
         </p>
       </div>
     );
@@ -174,14 +184,23 @@ function GameShell() {
 
   return (
     <main className="relative w-full h-screen overflow-hidden bg-[#0b1014]">
-      <WorldViewport
-        mobileInputRef={mobileInputRef}
-        onInteractTriggerRef={interactTriggerRef}
-      />
-      <GameHUD
-        mobileInputRef={mobileInputRef}
-        onInteract={() => interactTriggerRef.current?.()}
-      />
+      <Suspense
+        fallback={
+          <div className="w-full h-screen bg-[#0b1014] text-slate-200 flex flex-col items-center justify-center gap-3">
+            <div className="w-9 h-9 border-2 border-emerald-400 border-t-transparent rounded-full animate-spin" />
+            <p className="font-display text-sm font-semibold">Launching 3D Green Valley...</p>
+          </div>
+        }
+      >
+        <WorldViewport
+          mobileInputRef={mobileInputRef}
+          onInteractTriggerRef={interactTriggerRef}
+        />
+        <GameHUD
+          mobileInputRef={mobileInputRef}
+          onInteract={() => interactTriggerRef.current?.()}
+        />
+      </Suspense>
     </main>
   );
 }

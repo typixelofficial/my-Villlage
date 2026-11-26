@@ -60,8 +60,8 @@ service cloud.firestore {
           && arr[0].id is string && arr[0].id.size() >= 1 && arr[0].id.size() <= 64
           && arr[0].name is string && arr[0].name.size() >= 1 && arr[0].name.size() <= 32
           && arr[0].category in ['favorite', 'home', 'hangout', 'tea', 'event']
-          && arr[0].x is number && arr[0].x >= -450 && arr[0].x <= 450
-          && arr[0].z is number && arr[0].z >= -450 && arr[0].z <= 450
+          && arr[0].x is number && arr[0].x >= -1000 && arr[0].x <= 1000
+          && arr[0].z is number && arr[0].z >= -1000 && arr[0].z <= 1000
         )
       );
     }
@@ -88,9 +88,9 @@ service cloud.firestore {
       return pos is map
         && pos.size() == 3
         && pos.keys().hasOnly(['x', 'y', 'z'])
-        && pos.x is number && pos.x >= -500 && pos.x <= 500
+        && pos.x is number && pos.x >= -1000 && pos.x <= 1000
         && pos.y is number && pos.y >= -50 && pos.y <= 300
-        && pos.z is number && pos.z >= -500 && pos.z <= 500;
+        && pos.z is number && pos.z >= -1000 && pos.z <= 1000;
     }
 
     function isValidPlayerOptional(data) {
@@ -104,6 +104,8 @@ service cloud.firestore {
         && (!('totalDailyLogins' in data) || (data.totalDailyLogins is number && data.totalDailyLogins >= 0 && data.totalDailyLogins <= 10000))
         && (!('followedOfficial' in data) || data.followedOfficial is bool)
         && (!('followedStudio' in data) || data.followedStudio is bool)
+        && (!('muscleLevel' in data) || (data.muscleLevel is number && data.muscleLevel >= 0 && data.muscleLevel <= 10))
+        && (!('hasGameCenterCard' in data) || data.hasGameCenterCard is bool)
         && (!('customLocations' in data) || isValidLocationList(data.customLocations));
     }
 
@@ -122,7 +124,7 @@ service cloud.firestore {
           'uid', 'displayName', 'instagramId', 'photoURL', 'appearance',
           'age', 'relationshipStatus', 'partnerUid', 'partnerName', 'partnerInstagram',
           'lastDailyLoginDate', 'dailyLoginStreak', 'totalDailyLogins',
-          'followedOfficial', 'followedStudio', 'customLocations',
+          'followedOfficial', 'followedStudio', 'muscleLevel', 'hasGameCenterCard', 'customLocations',
           'greenCoins', 'level', 'xp',
           'ownedProperties', 'ownedBusinesses', 'ownedVehicles',
           'completedMissions', 'claimedRewards',
@@ -213,12 +215,11 @@ service cloud.firestore {
     }
 
     function isValidCustomHome(data, homeId) {
-      return data.size() == 18
-        && data.keys().hasOnly([
+      return data.keys().hasOnly([
           'homeId', 'name', 'ownerUid', 'ownerName', 'ownerInstagram',
           'createdByAdmin', 'style', 'wallColor', 'roofColor', 'hasPool',
-          'interiorTheme', 'gardenStyle', 'x', 'y', 'z', 'isPublic',
-          'createdAt', 'updatedAt'
+          'hasGarden', 'hasAc', 'interiorTheme', 'gardenStyle', 'x', 'y', 'z',
+          'isPublic', 'createdAt', 'updatedAt'
         ])
         && data.homeId == homeId
         && data.name is string && data.name.size() >= 2 && data.name.size() <= 32
@@ -232,21 +233,24 @@ service cloud.firestore {
         && isHexColor(data.wallColor)
         && isHexColor(data.roofColor)
         && data.hasPool is bool
+        && (!('hasGarden' in data) || data.hasGarden is bool)
+        && (!('hasAc' in data) || data.hasAc is bool)
         && data.interiorTheme in ['modern', 'cozy', 'minimal', 'luxury']
         && data.gardenStyle in ['flowers', 'zen', 'poolside', 'orchard']
-        && data.x is number && data.x >= -420 && data.x <= 420
+        && data.x is number && data.x >= -1000 && data.x <= 1000
         && data.y is number && data.y >= -10 && data.y <= 50
-        && data.z is number && data.z >= -420 && data.z <= 420
+        && data.z is number && data.z >= -1000 && data.z <= 1000
         && data.isPublic is bool && data.isPublic == true
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
 
     function isValidCustomShop(data, shopId) {
-      return data.size() == 14
-        && data.keys().hasOnly([
+      return data.keys().hasOnly([
           'shopId', 'name', 'shopType', 'ownerUid', 'ownerName', 'ownerInstagram',
-          'awningColor', 'x', 'y', 'z', 'totalSales', 'isPublic', 'createdAt', 'updatedAt'
+          'awningColor', 'ownerKeyHash', 'sizeTier', 'hasSeating', 'hasAc',
+          'x', 'y', 'z', 'totalSales', 'isPublic',
+          'createdAt', 'updatedAt'
         ])
         && data.shopId == shopId
         && data.name is string && data.name.size() >= 2 && data.name.size() <= 32
@@ -257,13 +261,34 @@ service cloud.firestore {
         && data.ownerName.matches('^[a-zA-Z0-9 _-]+$')
         && isValidInstagram(data.ownerInstagram)
         && isHexColor(data.awningColor)
-        && data.x is number && data.x >= -420 && data.x <= 420
+        && (!('ownerKeyHash' in data) || (data.ownerKeyHash is string && data.ownerKeyHash.size() <= 128))
+        && (!('sizeTier' in data) || data.sizeTier in ['small', 'medium', 'large', 'palace'])
+        && (!('hasSeating' in data) || data.hasSeating is bool)
+        && (!('hasAc' in data) || data.hasAc is bool)
+        && data.x is number && data.x >= -1000 && data.x <= 1000
         && data.y is number && data.y >= -10 && data.y <= 50
-        && data.z is number && data.z >= -420 && data.z <= 420
+        && data.z is number && data.z >= -1000 && data.z <= 1000
         && data.totalSales is number && data.totalSales >= 0 && data.totalSales <= 1000000
         && data.isPublic is bool && data.isPublic == true
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
+    }
+
+    function isValidPublicAd(data, adId) {
+      return data.size() == 9
+        && data.keys().hasOnly([
+          'adId', 'title', 'subtitle', 'instagramHandle',
+          'accentColor', 'ownerUid', 'ownerName', 'isPublic', 'createdAt'
+        ])
+        && data.adId == adId
+        && data.title is string && data.title.size() >= 2 && data.title.size() <= 42
+        && data.subtitle is string && data.subtitle.size() >= 2 && data.subtitle.size() <= 96
+        && isValidInstagram(data.instagramHandle)
+        && isHexColor(data.accentColor)
+        && isValidId(data.ownerUid)
+        && data.ownerName is string && data.ownerName.size() >= 2 && data.ownerName.size() <= 24
+        && data.isPublic is bool && data.isPublic == true
+        && data.createdAt is timestamp;
     }
 
     function isValidVerifiedFollower(data, igDocId) {
@@ -301,7 +326,7 @@ service cloud.firestore {
               'displayName', 'instagramId', 'photoURL', 'appearance',
               'age', 'relationshipStatus', 'partnerUid', 'partnerName', 'partnerInstagram',
               'lastDailyLoginDate', 'dailyLoginStreak', 'totalDailyLogins',
-              'followedOfficial', 'followedStudio', 'customLocations',
+              'followedOfficial', 'followedStudio', 'muscleLevel', 'hasGameCenterCard', 'customLocations',
               'greenCoins', 'level', 'xp', 'ownedProperties',
               'ownedBusinesses', 'ownedVehicles', 'completedMissions',
               'claimedRewards', 'inventory', 'friends', 'lastPosition', 'updatedAt'
@@ -414,7 +439,7 @@ service cloud.firestore {
             && request.resource.data.createdByAdmin == resource.data.createdByAdmin
             && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
               'name', 'ownerName', 'ownerInstagram', 'wallColor', 'roofColor',
-              'interiorTheme', 'gardenStyle', 'updatedAt'
+              'hasGarden', 'hasAc', 'interiorTheme', 'gardenStyle', 'updatedAt'
             ])
           )
         );
@@ -422,7 +447,7 @@ service cloud.firestore {
       allow delete: if isAdmin() && isValidId(homeId);
     }
 
-    // 4. Player-Opened Custom 3D Shops & Tea Stalls (Chaya Kada, Juice Bar, Bakery, Boutique, Tech)
+    // 4. Player-Opened Custom 3D Shops & Tea Stalls (with hashed secret owner interior key)
     match /customShops/{shopId} {
       allow get: if isSignedIn() && isValidId(shopId);
       allow list: if isSignedIn() && resource.data.isPublic == true;
@@ -447,7 +472,9 @@ service cloud.firestore {
           isAdmin()
           || (
             resource.data.ownerUid == request.auth.uid
-            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'awningColor', 'totalSales', 'updatedAt'])
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'name', 'awningColor', 'ownerKeyHash', 'sizeTier', 'hasSeating', 'hasAc', 'totalSales', 'updatedAt'
+            ])
           )
           || (
             request.resource.data.diff(resource.data).affectedKeys().hasOnly(['totalSales', 'updatedAt'])
@@ -461,7 +488,26 @@ service cloud.firestore {
         && (isAdmin() || resource.data.ownerUid == request.auth.uid);
     }
 
-    // 5. Verified Instagram Followers Registry (@typixelofficial & @typixel.studio)
+    // 5. Public Citizen Advertisements (Published at Green Valley Public Ad Center)
+    match /publicAds/{adId} {
+      allow get: if isSignedIn() && isValidId(adId);
+      allow list: if isSignedIn() && resource.data.isPublic == true;
+
+      allow create: if isSignedIn()
+        && isValidId(adId)
+        && isValidPublicAd(request.resource.data, adId)
+        && request.resource.data.createdAt == request.time
+        && (request.resource.data.ownerUid == request.auth.uid || isAdmin())
+        && exists(/databases/$(database)/documents/players/$(request.auth.uid));
+
+      allow update: if false;
+
+      allow delete: if isSignedIn()
+        && isValidId(adId)
+        && (isAdmin() || resource.data.ownerUid == request.auth.uid);
+    }
+
+    // 6. Verified Instagram Followers Registry (@typixelofficial & @typixel.studio)
     // Exact-ID get only (no public list scraping; zero PII). Only verified Admin may write/list/delete.
     match /verifiedFollowers/{igDocId} {
       allow get: if isValidIgDocId(igDocId);

@@ -8,17 +8,32 @@ import type {
   EmoteType,
   FriendRequest,
   GameToast,
+  HeldItemType,
   InteractablePrompt,
   MingleEventState,
   NetworkPlayer,
+  PalaceVillaDef,
+  PhoneCallState,
   PlayerProfile,
+  PublicAdDef,
+  PublicBusState,
+  SportsBallState,
   TimeOfDayMode,
+  TypixelUpdateAlert,
   VehicleState,
   WalletTransaction,
   WeatherMode,
   WorldPropertyOwnership,
 } from '../shared/types.ts';
-import { INITIAL_VEHICLES, MINGLE_MEETUP_LOCATIONS, MISSIONS } from '../shared/worldData.ts';
+import {
+  FOOTBALL_PITCH_CENTER,
+  INITIAL_VEHICLES,
+  MINGLE_MEETUP_LOCATIONS,
+  MISSIONS,
+  PALACE_VILLAS,
+  VOLLEYBALL_COURT_CENTER,
+  WORLD_HALF_SIZE,
+} from '../shared/worldData.ts';
 
 export type ScreenMode = 'loading' | 'login' | 'character' | 'world';
 export type ActivePanel =
@@ -41,7 +56,13 @@ export type ActivePanel =
   | 'admin'
   | 'vehicle_prompt'
   | 'pause'
-  | 'npc';
+  | 'npc'
+  | 'phone'
+  | 'search'
+  | 'ads'
+  | 'transit'
+  | 'game_center'
+  | 'villa';
 
 export interface VoicePeerState {
   uid: string;
@@ -57,13 +78,54 @@ interface ActiveNpcDialog {
   canHeal?: boolean;
 }
 
-function getNextHourMs(): number {
-  const now = new Date();
-  const next = new Date(now);
-  next.setMinutes(0, 0, 0);
-  next.setHours(next.getHours() + 1);
-  return next.getTime();
+export interface VillaAccessFlags {
+  canVisitOutside: boolean;
+  canEnterInside: boolean;
 }
+
+const initialVehiclesMap: Record<string, VehicleState> = {};
+for (const v of INITIAL_VEHICLES) {
+  initialVehiclesMap[v.id] = { ...v };
+}
+
+const initialVillasMap: Record<string, PalaceVillaDef> = {};
+for (const v of PALACE_VILLAS) {
+  initialVillasMap[v.villaId] = { ...v };
+}
+
+const defaultMingle: MingleEventState = {
+  nextEventAtMs: Date.now() + 5 * 60 * 1000,
+  maxRoundDurationMs: 5 * 60 * 1000,
+  alarmActive: false,
+  locationName: MINGLE_MEETUP_LOCATIONS[0].name,
+  locationPos: MINGLE_MEETUP_LOCATIONS[0].pos,
+  activeMatch: null,
+};
+
+const defaultSportsBalls: Record<'football' | 'volleyball', SportsBallState> = {
+  football: {
+    id: 'football',
+    x: FOOTBALL_PITCH_CENTER.x,
+    y: 0.45,
+    z: FOOTBALL_PITCH_CENTER.z,
+    vx: 0,
+    vy: 0,
+    vz: 0,
+    scoreA: 0,
+    scoreB: 0,
+  },
+  volleyball: {
+    id: 'volleyball',
+    x: VOLLEYBALL_COURT_CENTER.x,
+    y: 0.45,
+    z: VOLLEYBALL_COURT_CENTER.z,
+    vx: 0,
+    vy: 0,
+    vz: 0,
+    scoreA: 0,
+    scoreB: 0,
+  },
+};
 
 interface GameState {
   // Auth & Navigation
@@ -72,15 +134,21 @@ interface GameState {
   screen: ScreenMode;
   isEditingExistingCharacter: boolean;
   isAdmin: boolean;
+  adminBearerToken: string | null; // Strictly in-memory (NEVER localStorage)
   pendingInstagramDraft: string;
 
   // Player Profile & Local Live State
   profile: PlayerProfile | null;
   health: number;
+  lowHealthAlertDismissed: boolean;
+  localHeldItem: HeldItemType;
+  localHeldItemUntil: number;
   activeVehicleId: string | null;
   pendingVehiclePromptId: string | null;
   activeBuildingId: string | null;
   activeCustomShopId: string | null;
+  activeVillaId: string | null;
+  unlockedShopIds: string[];
   showWorldMapModal: boolean;
   localSpeedKmh: number;
   localAltitude: number;
@@ -90,11 +158,20 @@ interface GameState {
   // Multiplayer & World State
   socketConnected: boolean;
   sessionReplacedMessage: string | null;
+  villageHalfSize: number;
   remotePlayers: Record<string, NetworkPlayer>;
   vehicles: Record<string, VehicleState>;
+  publicBus: PublicBusState | null;
   worldProperties: Record<string, WorldPropertyOwnership>;
   customHomes: Record<string, CustomHomeDef>;
   customShops: Record<string, CustomShopDef>;
+  publicAds: PublicAdDef[];
+  palaceVillas: Record<string, PalaceVillaDef>;
+  villaAccess: Record<string, VillaAccessFlags>;
+  typixelUpdates: TypixelUpdateAlert[];
+  unreadUpdatesCount: number;
+  phoneCall: PhoneCallState | null;
+  sportsBalls: Record<'football' | 'volleyball', SportsBallState>;
   mingleEvent: MingleEventState;
   chatMessages: ChatMessage[];
   chatChannel: 'global' | 'proximity' | 'direct';
@@ -139,14 +216,19 @@ interface GameState {
   setAuthUser: (user: User | null, ready: boolean) => void;
   setScreen: (screen: ScreenMode, editingExisting?: boolean) => void;
   setIsAdmin: (isAdmin: boolean) => void;
+  setAdminBearerToken: (token: string | null) => void;
   setPendingInstagramDraft: (handle: string) => void;
   setProfile: (profile: PlayerProfile | null) => void;
   patchProfile: (partial: Partial<PlayerProfile>) => void;
   setHealth: (hp: number) => void;
+  setLowHealthAlertDismissed: (dismissed: boolean) => void;
+  setLocalHeldItem: (item: HeldItemType, untilMs?: number) => void;
   setActiveVehicleId: (id: string | null) => void;
   openVehiclePrompt: (vehicleId: string) => void;
   openBuildingPanel: (buildingId: string) => void;
   openPlayerShopPanel: (shopId: string) => void;
+  openVillaPanel: (villaId: string) => void;
+  markShopUnlocked: (shopId: string) => void;
   setShowWorldMapModal: (open: boolean) => void;
   setTelemetry: (
     speedKmh: number,
@@ -156,11 +238,13 @@ interface GameState {
   ) => void;
   setSocketConnected: (connected: boolean) => void;
   setSessionReplacedMessage: (msg: string | null) => void;
+  setVillageHalfSize: (halfSize: number) => void;
   setRemotePlayers: (players: Record<string, NetworkPlayer>) => void;
   upsertRemotePlayer: (player: NetworkPlayer) => void;
   removeRemotePlayer: (uid: string) => void;
   setVehicles: (vehicles: VehicleState[]) => void;
   updateVehicle: (vehicle: VehicleState) => void;
+  setPublicBus: (bus: PublicBusState | null) => void;
   setWorldProperties: (props: Record<string, WorldPropertyOwnership>) => void;
   upsertWorldProperty: (prop: WorldPropertyOwnership) => void;
   setCustomHomes: (homes: Record<string, CustomHomeDef>) => void;
@@ -169,6 +253,16 @@ interface GameState {
   setCustomShops: (shops: Record<string, CustomShopDef>) => void;
   upsertCustomShop: (shop: CustomShopDef) => void;
   removeCustomShop: (shopId: string) => void;
+  setPublicAds: (ads: PublicAdDef[]) => void;
+  prependPublicAd: (ad: PublicAdDef) => void;
+  setPalaceVillas: (villas: PalaceVillaDef[]) => void;
+  upsertPalaceVilla: (villa: PalaceVillaDef) => void;
+  setVillaAccess: (villaId: string, flags: Partial<VillaAccessFlags>) => void;
+  setTypixelUpdates: (updates: TypixelUpdateAlert[]) => void;
+  prependTypixelUpdate: (update: TypixelUpdateAlert) => void;
+  clearUnreadUpdates: () => void;
+  setPhoneCall: (call: PhoneCallState | null) => void;
+  setSportsBalls: (balls: SportsBallState[]) => void;
   setMingleEvent: (ev: MingleEventState) => void;
   patchMingleEvent: (partial: Partial<MingleEventState>) => void;
   addChatMessage: (msg: ChatMessage) => void;
@@ -212,33 +306,26 @@ interface GameState {
   resetForLogout: () => void;
 }
 
-const initialVehiclesMap: Record<string, VehicleState> = {};
-for (const v of INITIAL_VEHICLES) {
-  initialVehiclesMap[v.id] = { ...v };
-}
-
-const defaultMingle: MingleEventState = {
-  nextEventAtMs: getNextHourMs(),
-  alarmActive: false,
-  locationName: MINGLE_MEETUP_LOCATIONS[0].name,
-  locationPos: MINGLE_MEETUP_LOCATIONS[0].pos,
-  activeMatch: null,
-};
-
 export const useGameStore = create<GameState>((set) => ({
   authReady: false,
   firebaseUser: null,
   screen: 'loading',
   isEditingExistingCharacter: false,
   isAdmin: false,
+  adminBearerToken: null,
   pendingInstagramDraft: '',
 
   profile: null,
   health: 100,
+  lowHealthAlertDismissed: false,
+  localHeldItem: 'none',
+  localHeldItemUntil: 0,
   activeVehicleId: null,
   pendingVehiclePromptId: null,
   activeBuildingId: null,
   activeCustomShopId: null,
+  activeVillaId: null,
+  unlockedShopIds: [],
   showWorldMapModal: false,
   localSpeedKmh: 0,
   localAltitude: 0,
@@ -247,11 +334,20 @@ export const useGameStore = create<GameState>((set) => ({
 
   socketConnected: false,
   sessionReplacedMessage: null,
+  villageHalfSize: WORLD_HALF_SIZE,
   remotePlayers: {},
   vehicles: initialVehiclesMap,
+  publicBus: null,
   worldProperties: {},
   customHomes: {},
   customShops: {},
+  publicAds: [],
+  palaceVillas: initialVillasMap,
+  villaAccess: {},
+  typixelUpdates: [],
+  unreadUpdatesCount: 0,
+  phoneCall: null,
+  sportsBalls: defaultSportsBalls,
   mingleEvent: defaultMingle,
   chatMessages: [],
   chatChannel: 'global',
@@ -292,6 +388,7 @@ export const useGameStore = create<GameState>((set) => ({
   setScreen: (screen, editingExisting = false) =>
     set({ screen, isEditingExistingCharacter: editingExisting }),
   setIsAdmin: (isAdmin) => set({ isAdmin }),
+  setAdminBearerToken: (adminBearerToken) => set({ adminBearerToken }),
   setPendingInstagramDraft: (pendingInstagramDraft) => set({ pendingInstagramDraft }),
   setProfile: (profile) =>
     set((s) => {
@@ -308,7 +405,17 @@ export const useGameStore = create<GameState>((set) => ({
     }),
   patchProfile: (partial) =>
     set((s) => (s.profile ? { profile: { ...s.profile, ...partial } } : s)),
-  setHealth: (health) => set({ health: Math.max(0, Math.min(100, health)) }),
+  setHealth: (hp) =>
+    set((s) => {
+      const clamped = Math.max(0, Math.min(100, Math.round(hp)));
+      return {
+        health: clamped,
+        lowHealthAlertDismissed: clamped >= 50 ? false : s.lowHealthAlertDismissed,
+      };
+    }),
+  setLowHealthAlertDismissed: (lowHealthAlertDismissed) => set({ lowHealthAlertDismissed }),
+  setLocalHeldItem: (localHeldItem, untilMs = Date.now() + 9000) =>
+    set({ localHeldItem, localHeldItemUntil: localHeldItem === 'none' ? 0 : untilMs }),
   setActiveVehicleId: (activeVehicleId) => set({ activeVehicleId }),
   openVehiclePrompt: (vehicleId) =>
     set({ pendingVehiclePromptId: vehicleId, activePanel: 'vehicle_prompt' }),
@@ -316,11 +423,20 @@ export const useGameStore = create<GameState>((set) => ({
     set({ activeBuildingId: buildingId, activePanel: 'building' }),
   openPlayerShopPanel: (shopId) =>
     set({ activeCustomShopId: shopId, activePanel: 'player_shop' }),
+  openVillaPanel: (villaId) =>
+    set({ activeVillaId: villaId, activePanel: 'villa' }),
+  markShopUnlocked: (shopId) =>
+    set((s) => ({
+      unlockedShopIds: s.unlockedShopIds.includes(shopId)
+        ? s.unlockedShopIds
+        : [...s.unlockedShopIds, shopId],
+    })),
   setShowWorldMapModal: (showWorldMapModal) => set({ showWorldMapModal }),
   setTelemetry: (localSpeedKmh, localAltitude, currentDistrictName, localPos) =>
     set({ localSpeedKmh, localAltitude, currentDistrictName, localPos }),
   setSocketConnected: (socketConnected) => set({ socketConnected }),
   setSessionReplacedMessage: (sessionReplacedMessage) => set({ sessionReplacedMessage }),
+  setVillageHalfSize: (villageHalfSize) => set({ villageHalfSize }),
   setRemotePlayers: (remotePlayers) => set({ remotePlayers }),
   upsertRemotePlayer: (player) =>
     set((s) => ({
@@ -348,6 +464,7 @@ export const useGameStore = create<GameState>((set) => ({
     set((s) => ({
       vehicles: { ...s.vehicles, [vehicle.id]: vehicle },
     })),
+  setPublicBus: (publicBus) => set({ publicBus }),
   setWorldProperties: (worldProperties) => set({ worldProperties }),
   upsertWorldProperty: (prop) =>
     set((s) => ({
@@ -374,6 +491,49 @@ export const useGameStore = create<GameState>((set) => ({
       const next = { ...s.customShops };
       delete next[shopId];
       return { customShops: next };
+    }),
+  setPublicAds: (publicAds) => set({ publicAds }),
+  prependPublicAd: (ad) =>
+    set((s) => {
+      if (s.publicAds.some((a) => a.adId === ad.adId)) return s;
+      return { publicAds: [ad, ...s.publicAds.slice(0, 29)] };
+    }),
+  setPalaceVillas: (villasList) =>
+    set(() => {
+      const map: Record<string, PalaceVillaDef> = {};
+      for (const v of villasList) map[v.villaId] = v;
+      return { palaceVillas: map };
+    }),
+  upsertPalaceVilla: (villa) =>
+    set((s) => ({
+      palaceVillas: { ...s.palaceVillas, [villa.villaId]: villa },
+    })),
+  setVillaAccess: (villaId, flags) =>
+    set((s) => {
+      const prev = s.villaAccess[villaId] || { canVisitOutside: false, canEnterInside: false };
+      return {
+        villaAccess: {
+          ...s.villaAccess,
+          [villaId]: { ...prev, ...flags },
+        },
+      };
+    }),
+  setTypixelUpdates: (typixelUpdates) => set({ typixelUpdates }),
+  prependTypixelUpdate: (update) =>
+    set((s) => {
+      if (s.typixelUpdates.some((u) => u.id === update.id)) return s;
+      return {
+        typixelUpdates: [update, ...s.typixelUpdates.slice(0, 29)],
+        unreadUpdatesCount: s.activePanel === 'phone' ? 0 : Math.min(99, s.unreadUpdatesCount + 1),
+      };
+    }),
+  clearUnreadUpdates: () => set({ unreadUpdatesCount: 0 }),
+  setPhoneCall: (phoneCall) => set({ phoneCall }),
+  setSportsBalls: (ballsList) =>
+    set((s) => {
+      const next = { ...s.sportsBalls };
+      for (const b of ballsList) next[b.id] = b;
+      return { sportsBalls: next };
     }),
   setMingleEvent: (mingleEvent) => set({ mingleEvent }),
   patchMingleEvent: (partial) =>
@@ -468,6 +628,7 @@ export const useGameStore = create<GameState>((set) => ({
     set((s) => ({
       activePanel,
       unreadChatCount: activePanel === 'chat' ? 0 : s.unreadChatCount,
+      unreadUpdatesCount: activePanel === 'phone' ? 0 : s.unreadUpdatesCount,
     })),
   openNpcDialog: (activeNpcDialog) => set({ activeNpcDialog, activePanel: 'npc' }),
   toggleHudCollapsed: () => set((s) => ({ hudCollapsed: !s.hudCollapsed })),
@@ -494,19 +655,30 @@ export const useGameStore = create<GameState>((set) => ({
       profile: null,
       screen: 'login',
       isAdmin: false,
+      adminBearerToken: null,
+      health: 100,
+      lowHealthAlertDismissed: false,
+      localHeldItem: 'none',
+      localHeldItemUntil: 0,
       activeVehicleId: null,
       pendingVehiclePromptId: null,
       activeBuildingId: null,
       activeCustomShopId: null,
+      activeVillaId: null,
+      unlockedShopIds: [],
       showWorldMapModal: false,
       activeWorkShift: null,
       waypointTarget: null,
       remotePlayers: {},
       customShops: {},
+      publicBus: null,
+      phoneCall: null,
+      villaAccess: {},
       mingleEvent: defaultMingle,
       chatMessages: [],
       directChatTargetUid: null,
       unreadChatCount: 0,
+      unreadUpdatesCount: 0,
       friendRequests: [],
       voiceJoined: false,
       voiceMuted: false,

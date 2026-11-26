@@ -2,27 +2,45 @@ import type {
   ActiveBuildingDef,
   BusinessDef,
   CustomHomePlan,
+  CustomHomeStyle,
   CustomShopPlan,
   DistrictId,
   Gender,
+  MiniGameDef,
   MissionDef,
   NpcDef,
+  PalaceVillaDef,
   PropertyDef,
   RewardDef,
   ShopItemDef,
+  ShopSizeTier,
   ShowcaseAdItem,
   Vec3,
   VehicleState,
   WorkJobDef,
 } from './types.ts';
 
-// Expansive 840m x 840m "Long Place" Open World with long scenic highways and residential plots
-export const WORLD_HALF_SIZE = 420;
+// Expansive 1120m x 1120m Open World (Admin can dynamically expand up to 1900m x 1900m!)
+export const WORLD_HALF_SIZE = 560;
+export const MAX_WORLD_HALF_SIZE = 950;
 export const WORLD_SPAWN = { x: 0, y: 0, z: 16 };
+
+// High-Risk North Ridge Cliff location for the Hidden Game Center Entrance Card
+export const HIDDEN_CARD_POS: Vec3 = { x: -208, y: 17.4, z: -252 };
+export const HIDDEN_CARD_CLUES: string[] = [
+  'Clue 1: Leave the main roads and travel far North-West past Oakwood & Sunset Valley.',
+  'Clue 2: Look for the towering jagged Danger Peak Cliff rising steeply above the northern valley mist.',
+  'Clue 3: Climb carefully up the rocky narrow trail on the high-risk cliff (watch your HP — falling hurts!).',
+  'Clue 4: At the very summit spire (near -208, -252), a spinning golden VIP Entrance Card awaits.',
+];
+
+// Playable 3D Sports Venues (Sports Complex North-East)
+export const FOOTBALL_PITCH_CENTER: Vec3 = { x: 112, y: 0, z: -98 };
+export const VOLLEYBALL_COURT_CENTER: Vec3 = { x: 112, y: 0, z: -56 };
 
 /**
  * Deterministic terrain elevation shared by Three.js terrain mesh, physics, and server.
- * Extended flat valley core (radius 330m) supports long scenic highways and custom home plots.
+ * Extended flat valley core supports large village plots + High-Risk North Peak Cliff.
  */
 export function groundHeightAt(x: number, z: number): number {
   const distFromCenter = Math.hypot(x, z);
@@ -43,18 +61,152 @@ export function groundHeightAt(x: number, z: number): number {
     return -1.4 * t * t * bridgeFactor;
   }
 
-  // Wide playable valley floor across the long highway & buildable plots
-  if (distFromCenter < 335) {
+  // High-Risk Danger Peak Cliff (North-West at -208, -252) holding the Hidden Entrance Card
+  const cliffDist = Math.hypot(x + 208, z + 252);
+  if (cliffDist < 42) {
+    const t = Math.max(0, 1 - cliffDist / 42);
+    return 17.2 * Math.pow(t, 1.35);
+  }
+
+  // Wide playable valley floor across the expanded village & buildable plots
+  if (distFromCenter < 480) {
     return 0;
   }
 
   // Rolling alpine foothills rising naturally toward the mountain perimeter
-  const rimT = Math.min(1, (distFromCenter - 335) / 120);
+  const rimT = Math.min(1, (distFromCenter - 480) / 160);
   const hillNoise =
-    Math.sin(x * 0.022) * Math.cos(z * 0.02) * 7.0 +
-    Math.sin((x + z) * 0.015) * 5.0 +
+    Math.sin(x * 0.018) * Math.cos(z * 0.016) * 7.5 +
+    Math.sin((x + z) * 0.013) * 5.0 +
     15;
   return rimT * rimT * hillNoise;
+}
+
+export const PALACE_VILLAS: PalaceVillaDef[] = [
+  {
+    villaId: 'hashim_villa',
+    boardName: "Hashim's Villa",
+    ownerUsername: '__hashim_mhd_',
+    ownerDisplayName: 'Hashim',
+    visitFee: 150,
+    hasKeySet: true,
+    x: -185,
+    z: 52,
+    gatePos: { x: -162, y: 0, z: 52 },
+    doorPos: { x: -185, y: 0, z: 64 },
+    wallSize: { w: 46, d: 42 },
+    accentColor: '#f59e0b',
+  },
+  {
+    villaId: 'rifad_villa',
+    boardName: "Rifad's Villa",
+    ownerUsername: '_rifadeeyy',
+    ownerDisplayName: 'Rifad',
+    visitFee: 150,
+    hasKeySet: false,
+    x: 185,
+    z: -52,
+    gatePos: { x: 162, y: 0, z: -52 },
+    doorPos: { x: 185, y: 0, z: -40 },
+    wallSize: { w: 46, d: 42 },
+    accentColor: '#38bdf8',
+  },
+];
+
+/**
+ * Strict Road, Plaza, Water, Sports Field & Palace Compound clearance validator.
+ * Prevents ANY custom house or shop from ever spawning on a road or restricted landmark!
+ */
+export function isPositionOnRoad(
+  x: number,
+  z: number,
+  clearance = 13,
+): { onRoad: boolean; reason?: string } {
+  // 1. Main North-South Grand Highway (x = 0)
+  if (Math.abs(x) < 11 + clearance * 0.5) {
+    return { onRoad: true, reason: 'Blocked: On the North-South Main Highway' };
+  }
+  // 2. Main East-West Valley Avenue (z = 0)
+  if (Math.abs(z) < 11 + clearance * 0.5) {
+    return { onRoad: true, reason: 'Blocked: On the East-West Main Avenue' };
+  }
+  // 3. Central Fountain Plaza roundabout
+  if (Math.hypot(x, z) < 30 + clearance * 0.5) {
+    return { onRoad: true, reason: 'Blocked: Inside Central Fountain Plaza' };
+  }
+  // 4. Secondary Commercial/Residential Ring Roads (x = ±56, z = ±72)
+  if (Math.abs(Math.abs(x) - 56) < 8 && Math.abs(z) < 120) {
+    return { onRoad: true, reason: 'Blocked: On Valley Ring Road' };
+  }
+  if (Math.abs(Math.abs(z) - 72) < 8 && Math.abs(x) < 120) {
+    return { onRoad: true, reason: 'Blocked: On Valley Cross Street' };
+  }
+  // 5. Lake & River water channels
+  if (groundHeightAt(x, z) < -0.35) {
+    return { onRoad: true, reason: 'Blocked: Over Emerald Lake or River water' };
+  }
+  // 6. Airport Runway
+  if (x > 72 && x < 146 && z > 88 && z < 134) {
+    return { onRoad: true, reason: 'Blocked: On Valley Airport Runway' };
+  }
+  // 7. Sports Complex Football & Volleyball fields
+  if (Math.hypot(x - FOOTBALL_PITCH_CENTER.x, z - FOOTBALL_PITCH_CENTER.z) < 28) {
+    return { onRoad: true, reason: 'Blocked: On Football Pitch' };
+  }
+  if (Math.hypot(x - VOLLEYBALL_COURT_CENTER.x, z - VOLLEYBALL_COURT_CENTER.z) < 18) {
+    return { onRoad: true, reason: 'Blocked: On Volleyball Court' };
+  }
+  // 8. Hashim's Villa & Rifad's Villa Walled Palace Compounds
+  for (const v of PALACE_VILLAS) {
+    if (
+      Math.abs(x - v.x) < v.wallSize.w * 0.5 + 9 &&
+      Math.abs(z - v.z) < v.wallSize.d * 0.5 + 9
+    ) {
+      return { onRoad: true, reason: `Blocked: Inside ${v.boardName} Palace Compound` };
+    }
+  }
+  // 9. High-Risk Cliff Peak
+  if (Math.hypot(x - HIDDEN_CARD_POS.x, z - HIDDEN_CARD_POS.z) < 44) {
+    return { onRoad: true, reason: 'Blocked: Steep High-Risk Cliff Zone' };
+  }
+  return { onRoad: false };
+}
+
+export const SHOP_SIZE_TIERS: {
+  tier: ShopSizeTier;
+  label: string;
+  priceMultiplier: number;
+  scale: number;
+  desc: string;
+}[] = [
+  { tier: 'small', label: 'Small Stall', priceMultiplier: 1.0, scale: 1.0, desc: 'Compact roadside stall' },
+  { tier: 'medium', label: 'Medium Shop', priceMultiplier: 1.7, scale: 1.32, desc: 'Wider counter & display shelf' },
+  { tier: 'large', label: 'Large Showroom', priceMultiplier: 2.6, scale: 1.65, desc: 'Spacious double-bay shopfront' },
+  { tier: 'palace', label: 'Palace Emporium', priceMultiplier: 4.0, scale: 2.05, desc: 'Grand flagship commercial hall' },
+];
+
+export function computeHouseTotalPrice(
+  style: CustomHomeStyle,
+  facilities: { hasPool?: boolean; hasGarden?: boolean; hasAc?: boolean },
+): number {
+  const plan = CUSTOM_HOME_PLANS.find((p) => p.style === style) || CUSTOM_HOME_PLANS[0];
+  let total = plan.price;
+  if (facilities.hasPool && !plan.defaultPool) total += 450;
+  if (facilities.hasGarden) total += 250;
+  if (facilities.hasAc) total += 300;
+  return total;
+}
+
+export function computeShopTotalPrice(
+  basePrice: number,
+  sizeTier: ShopSizeTier,
+  facilities: { hasSeating?: boolean; hasAc?: boolean },
+): number {
+  const tierObj = SHOP_SIZE_TIERS.find((t) => t.tier === sizeTier) || SHOP_SIZE_TIERS[0];
+  let total = Math.round(basePrice * tierObj.priceMultiplier);
+  if (facilities.hasSeating) total += 220;
+  if (facilities.hasAc) total += 300;
+  return total;
 }
 
 export interface DistrictZone {
@@ -176,38 +328,43 @@ export function getDistrictAt(x: number, z: number): DistrictZone {
 export const CUSTOM_HOME_PLANS: CustomHomePlan[] = [
   {
     style: 'cabin',
-    label: 'Cozy Timber Cabin',
-    price: 500,
+    tierLabel: 'Small',
+    label: 'Small Cozy Cottage',
+    price: 550,
     size: { x: 9, y: 5.8, z: 8 },
     defaultPool: false,
-    description: 'Warm wood-and-stone starter home with pitched roof and garden yard.',
+    description: 'Compact starter cottage with pitched roof & clear signboard.',
   },
   {
     style: 'modern',
-    label: 'Modern Family House',
-    price: 1100,
-    size: { x: 12, y: 7.4, z: 10 },
+    tierLabel: 'Medium',
+    label: 'Medium Family House',
+    price: 1250,
+    size: { x: 12.5, y: 7.6, z: 10.5 },
     defaultPool: false,
-    description: 'Clean contemporary two-floor residence with panoramic windows.',
+    description: 'Two-floor contemporary family residence with panoramic windows.',
   },
   {
     style: 'villa',
-    label: 'Luxury Pool Villa',
-    price: 1900,
-    size: { x: 14.5, y: 8.8, z: 11.5 },
+    tierLabel: 'Large',
+    label: 'Large Luxury Villa',
+    price: 2400,
+    size: { x: 15.5, y: 9.2, z: 12.5 },
     defaultPool: true,
     description: 'Spacious architectural villa complete with private turquoise pool deck.',
   },
   {
     style: 'manor',
-    label: 'Grand Valley Manor',
-    price: 3000,
-    size: { x: 17.5, y: 11.2, z: 13.5 },
+    tierLabel: 'Palace',
+    label: 'Grand Royal Palace',
+    price: 4500,
+    size: { x: 19.5, y: 12.4, z: 15.5 },
     defaultPool: true,
-    description: 'Flagship multi-story estate with pool, terrace, and signature presence.',
+    description: 'Monumental multi-story palace estate with pool, terrace, and grand pillars.',
   },
 ];
 
+// Clean core starter properties (trimmed extra duplicate houses as requested)
 export const PROPERTIES: PropertyDef[] = [
   {
     id: 'prop-timber-cottage',
@@ -215,25 +372,12 @@ export const PROPERTIES: PropertyDef[] = [
     category: 'cottage',
     district: 'residential',
     price: 600,
-    position: { x: -48, y: 0, z: -36 },
-    doorPosition: { x: -48, y: 0, z: -29.5 },
+    position: { x: -42, y: 0, z: -36 },
+    doorPosition: { x: -42, y: 0, z: -29.5 },
     size: { x: 10, y: 6.5, z: 9 },
     color: '#d6c3a5',
     roofColor: '#5c4033',
-    description: 'Cozy stone-and-timber cottage overlooking the central lane with a sunlit front garden.',
-  },
-  {
-    id: 'prop-maple-bungalow',
-    name: 'Maple Garden Bungalow',
-    category: 'cottage',
-    district: 'residential',
-    price: 850,
-    position: { x: -74, y: 0, z: -36 },
-    doorPosition: { x: -74, y: 0, z: -29.5 },
-    size: { x: 11, y: 6.8, z: 9.5 },
-    color: '#e8dfd1',
-    roofColor: '#3f5163',
-    description: 'Bright modern bungalow surrounded by maple trees and paved parking.',
+    description: 'Cozy stone-and-timber starter cottage overlooking the central avenue.',
   },
   {
     id: 'prop-lakeview-villa',
@@ -241,54 +385,13 @@ export const PROPERTIES: PropertyDef[] = [
     category: 'villa',
     district: 'residential',
     price: 1400,
-    position: { x: -56, y: 0, z: -70 },
-    doorPosition: { x: -56, y: 0, z: -62.5 },
+    position: { x: -78, y: 0, z: -48 },
+    doorPosition: { x: -78, y: 0, z: -40.5 },
     size: { x: 14, y: 8.5, z: 11 },
     color: '#f2f0eb',
     roofColor: '#2c3e50',
     hasPool: true,
-    description: 'Two-story luxury villa with private turquoise swimming pool and terrace lounge.',
-  },
-  {
-    id: 'prop-hillside-manor',
-    name: 'Emerald Hillside Manor',
-    category: 'manor',
-    district: 'residential',
-    price: 2200,
-    position: { x: -88, y: 0, z: -72 },
-    doorPosition: { x: -88, y: 0, z: -64 },
-    size: { x: 16, y: 9.5, z: 12 },
-    color: '#ece6da',
-    roofColor: '#3d4c41',
-    hasPool: true,
-    description: 'Flagship Green Valley estate with dual terraces, pool deck, and panoramic mountain views.',
-  },
-  {
-    id: 'prop-skyline-apt',
-    name: 'Oakwood Modern Loft',
-    category: 'apartment',
-    district: 'residential',
-    price: 1100,
-    position: { x: -46, y: 0, z: -102 },
-    doorPosition: { x: -46, y: 0, z: -94 },
-    size: { x: 14, y: 13.5, z: 11 },
-    color: '#dce3e8',
-    roofColor: '#27313d',
-    description: 'Contemporary apartment residence with floor-to-ceiling glass balconies.',
-  },
-  {
-    id: 'prop-lakeside-retreat',
-    name: 'Lakeside Pier Retreat',
-    category: 'villa',
-    district: 'entertainment',
-    price: 1650,
-    position: { x: -54, y: 0, z: 42 },
-    doorPosition: { x: -54, y: 0, z: 35.5 },
-    size: { x: 12, y: 7.5, z: 10 },
-    color: '#e9dec8',
-    roofColor: '#485a68',
-    hasPool: true,
-    description: 'Waterfront getaway steps from Golden Sands Beach and the sailboat dock.',
+    description: 'Two-story residential villa with private pool and terrace lounge.',
   },
 ];
 
@@ -356,6 +459,7 @@ export const BUSINESSES: BusinessDef[] = [
  * - Bicycle is free to take anytime by walking up.
  * - Cars, Motorcycles, SUVs, and SkyCab can be rented per ride OR permanently unlocked with Green Coins!
  */
+// Clean essential fleet (trimmed clutter vehicles as requested; full-time autonomous KSRTC Bus runs continuously!)
 export const INITIAL_VEHICLES: VehicleState[] = [
   {
     id: 'veh-eco-bike',
@@ -412,122 +516,14 @@ export const INITIAL_VEHICLES: VehicleState[] = [
     buyPrice: 680,
   },
   {
-    id: 'veh-ridge-suv',
-    name: 'Valley Ridge SUV',
-    kind: 'suv',
-    color: '#3b82f6',
-    x: 48,
-    y: 0,
-    z: 8,
-    rotY: Math.PI,
-    speed: 0,
-    driverUid: null,
-    maxSpeed: 30,
-    accel: 17,
-    turnSpeed: 2.0,
-    canFly: false,
-    rentPrice: 75,
-    buyPrice: 950,
-  },
-  {
-    id: 'veh-apex-gt',
-    name: 'Apex GT Coupe',
-    kind: 'sports',
-    color: '#ef4444',
-    x: 56,
-    y: 0,
-    z: 74,
-    rotY: -Math.PI * 0.25,
-    speed: 0,
-    driverUid: null,
-    maxSpeed: 46,
-    accel: 28,
-    turnSpeed: 2.5,
-    canFly: false,
-    rentPrice: 120,
-    buyPrice: 1750,
-  },
-  {
-    id: 'veh-skycab-1',
-    name: 'SkyCab Aero Taxi',
-    kind: 'flying_taxi',
-    color: '#facc15',
-    x: 92,
-    y: 0,
-    z: 86,
-    rotY: -Math.PI * 0.5,
-    speed: 0,
-    driverUid: null,
-    maxSpeed: 48,
-    accel: 25,
-    turnSpeed: 2.2,
-    canFly: true,
-    rentPrice: 150,
-    buyPrice: 2400,
-  },
-  {
-    id: 'veh-breeze-ev',
-    name: 'Breeze Highway EV',
-    kind: 'electric',
-    color: '#e2e8f0',
-    x: 12,
-    y: 0,
-    z: 185,
-    rotY: 0,
-    speed: 0,
-    driverUid: null,
-    maxSpeed: 32,
-    accel: 19,
-    turnSpeed: 2.3,
-    canFly: false,
-    rentPrice: 50,
-    buyPrice: 600,
-  },
-  {
-    id: 'veh-cruiser-2',
-    name: 'Sunset Moto Cruiser',
-    kind: 'motorcycle',
-    color: '#ec4899',
-    x: -170,
-    y: 0,
-    z: -12,
-    rotY: Math.PI * 0.5,
-    speed: 0,
-    driverUid: null,
-    maxSpeed: 35,
-    accel: 23,
-    turnSpeed: 2.8,
-    canFly: false,
-    rentPrice: 55,
-    buyPrice: 680,
-  },
-  {
     id: 'veh-ksrtc-plaza',
-    name: 'KSRTC Super Fast (Plaza)',
+    name: 'KSRTC Super Fast',
     kind: 'ksrtc_bus',
     color: '#dc2626',
-    x: 12,
+    x: 16,
     y: 0,
-    z: 26,
+    z: 28,
     rotY: -Math.PI * 0.5,
-    speed: 0,
-    driverUid: null,
-    maxSpeed: 31,
-    accel: 14,
-    turnSpeed: 1.75,
-    canFly: false,
-    rentPrice: 25,
-    buyPrice: 500,
-  },
-  {
-    id: 'veh-ksrtc-depot',
-    name: 'KSRTC Fast Passenger (Depot)',
-    kind: 'ksrtc_bus',
-    color: '#b91c1c',
-    x: 42,
-    y: 0,
-    z: 82,
-    rotY: Math.PI,
     speed: 0,
     driverUid: null,
     maxSpeed: 31,
@@ -539,58 +535,101 @@ export const INITIAL_VEHICLES: VehicleState[] = [
   },
 ];
 
+export const WEEKLY_REWARD_COOLDOWN_SEC = 7 * 24 * 60 * 60; // 7 days (once a week)
+export const PUBLIC_AD_PUBLISH_COST = 200;
+export const PUBLIC_BUS_FARE = 15;
+export const CONDUCTOR_SALARY_PER_MIN = 72; // 12 GC per 10 seconds on duty
+
+export const PUBLIC_BUS_ROUTE_STOPS: { name: string; x: number; z: number }[] = [
+  { name: 'Central Fountain Plaza', x: 0, z: 22 },
+  { name: 'Green Valley Ad Center', x: 34, z: 18 },
+  { name: 'Grand Valley Mall', x: 56, z: 0 },
+  { name: 'Apex Fitness Gym & Stadium', x: 56, z: -72 },
+  { name: 'Central Hospital Campus', x: 14, z: -74 },
+  { name: 'Emerald Central Park', x: -34, z: -12 },
+  { name: 'Royal Wedding Mandapam', x: -96, z: -12 },
+  { name: 'Golden Sands Beach Rd', x: -42, z: 68 },
+  { name: 'KSRTC Central Bus Terminal', x: 36, z: 72 },
+];
+
 export const WORK_JOBS: WorkJobDef[] = [
+  {
+    id: 'work-auto-driver',
+    title: 'Auto Rickshaw Town Trip',
+    role: 'Auto Driver',
+    district: 'plaza',
+    payout: 195,
+    xp: 65,
+    cooldownSec: 25,
+    station: { x: 8, y: 0, z: 18 },
+    target: { x: 64, y: 0, z: -2 },
+    targetName: 'Grand Valley Mall Auto Stand',
+    description: 'Pick up passengers at Central Plaza and complete an Auto Rickshaw fare to Grand Valley Mall.',
+  },
+  {
+    id: 'work-bus-driver',
+    title: 'KSRTC Express Bus Route',
+    role: 'Bus Driver',
+    district: 'transport',
+    payout: 280,
+    xp: 95,
+    cooldownSec: 30,
+    station: { x: 42, y: 0, z: 82 },
+    target: { x: 14, y: 0, z: -82 },
+    targetName: 'Central Hospital Bus Stop',
+    description: 'Run a KSRTC Super Fast route from KSRTC Terminal to Central Hospital for a full driver salary.',
+  },
+  {
+    id: 'work-tea-shop',
+    title: 'Chaya Kada Tea Shop Shift',
+    role: 'Tea Master',
+    district: 'commercial',
+    payout: 175,
+    xp: 60,
+    cooldownSec: 25,
+    station: { x: 38, y: 0, z: -20 },
+    target: { x: -28, y: 0, z: 26 },
+    targetName: 'Emerald Central Park Tea Point',
+    description: 'Brew fresh Samovar Masala Chai and deliver hot tea flasks to park visitors for your shop salary.',
+  },
+  {
+    id: 'work-hospital-doctor',
+    title: 'Hospital Duty Doctor Shift',
+    role: 'Duty Doctor',
+    district: 'education_health',
+    payout: 310,
+    xp: 110,
+    cooldownSec: 30,
+    station: { x: 16, y: 0, z: -86 },
+    target: { x: -18, y: 0, z: -96 },
+    targetName: 'School Health Checkup Camp',
+    description: 'Serve on medical duty from Central Hospital to Green Valley School for a Doctor Salary payout.',
+  },
+  {
+    id: 'work-gym-trainer',
+    title: 'Apex Gym Fitness Trainer',
+    role: 'Fitness Coach',
+    district: 'sports',
+    payout: 245,
+    xp: 90,
+    cooldownSec: 28,
+    station: { x: 68, y: 0, z: -76 },
+    target: { x: 92, y: 0, z: -96 },
+    targetName: 'Valley Cricket Stadium Track',
+    description: 'Lead a strength & conditioning workout from Apex Gym to the Stadium Track for coach salary.',
+  },
   {
     id: 'work-plaza-courier',
     title: 'Valley Express Courier',
     role: 'Delivery Runner',
     district: 'plaza',
-    payout: 180,
+    payout: 185,
     xp: 60,
     cooldownSec: 25,
     station: { x: 4, y: 0, z: 12 },
     target: { x: 42, y: 0, z: -24 },
     targetName: 'Sunset Roasters Café',
     description: 'Walk or drive an express parcel from Central Fountain Square to Sunset Roasters Café.',
-  },
-  {
-    id: 'work-cafe-barista',
-    title: 'Sunset Café Morning Shift',
-    role: 'Barista',
-    district: 'commercial',
-    payout: 160,
-    xp: 55,
-    cooldownSec: 25,
-    station: { x: 38, y: 0, z: -20 },
-    target: { x: 70, y: 0, z: -2 },
-    targetName: 'Grand Valley Mall Atrium',
-    description: 'Deliver warm espresso trays to staff at Grand Valley Shopping Mall.',
-  },
-  {
-    id: 'work-hospital-medic',
-    title: 'Hospital Rapid Supply',
-    role: 'Clinic Assistant',
-    district: 'education_health',
-    payout: 230,
-    xp: 80,
-    cooldownSec: 30,
-    station: { x: 16, y: 0, z: -86 },
-    target: { x: -18, y: 0, z: -96 },
-    targetName: 'Green Valley School Nurse',
-    description: 'Bring first-aid supply kits from Central Hospital to Green Valley School.',
-  },
-  {
-    id: 'work-stadium-crew',
-    title: 'Stadium Match Preparation',
-    role: 'Grounds Crew',
-    district: 'sports',
-    payout: 210,
-    xp: 75,
-    cooldownSec: 30,
-    station: { x: 74, y: 0, z: -76 },
-    target: { x: 92, y: 0, z: -96 },
-    targetName: 'Cricket Stadium Pitch',
-    description: 'Inspect the cricket pitch and deliver match gear at Valley Sports Complex.',
   },
   {
     id: 'work-beach-lifeguard',
@@ -610,24 +649,24 @@ export const WORK_JOBS: WorkJobDef[] = [
     title: 'Long Highway Supply Run',
     role: 'Valley Logistics',
     district: 'emerald_highway',
-    payout: 340,
-    xp: 120,
+    payout: 360,
+    xp: 125,
     cooldownSec: 40,
     station: { x: 0, y: 0, z: 24 },
     target: { x: 0, y: 0, z: 240 },
     targetName: 'South Highway Overlook',
-    description: 'Long-distance haul down the scenic Emerald Grand Highway for top Green Coins pay.',
+    description: 'Long-distance haul down the scenic Emerald Grand Highway for top Green Coins salary.',
   },
 ];
 
 export const REWARDS: RewardDef[] = [
   {
     id: 'rew-daily-checkin',
-    title: 'Daily Green Valley Check-In',
-    description: 'Claim your resident stipend every 10 minutes of active play.',
-    coins: 300,
-    xp: 90,
-    repeatableSec: 600,
+    title: 'Weekly Green Valley Stipend (Once / Week)',
+    description: 'Claim your resident bonus reward once every 7 days.',
+    coins: 500,
+    xp: 150,
+    repeatableSec: WEEKLY_REWARD_COOLDOWN_SEC,
   },
   {
     id: 'rew-insta-profile',
@@ -996,11 +1035,11 @@ export const CUSTOM_SHOP_PLANS: CustomShopPlan[] = [
     label: 'Kerala Tea Stall (Chaya Kada)',
     price: 350,
     defaultAwning: '#e11d48',
-    description: 'Serve steaming Samovar Masala Chai, Pazham Pori & Parotta anywhere in Green Valley!',
+    description: 'Serve steaming Samovar Masala Chai, Pazham Pori & Parotta anywhere off-road!',
     menuItems: [
-      { id: 'tea-masala', name: 'Samovar Masala Chai', price: 20, healthRestore: 25, xp: 18 },
-      { id: 'tea-pazhampori', name: 'Hot Pazham Pori', price: 30, healthRestore: 35, xp: 24 },
-      { id: 'tea-parotta', name: 'Malabar Parotta & Curry', price: 55, healthRestore: 60, xp: 40 },
+      { id: 'tea-masala', name: 'Samovar Masala Chai', price: 20, healthRestore: 25, xp: 18, heldItem: 'tea' },
+      { id: 'tea-pazhampori', name: 'Hot Pazham Pori', price: 30, healthRestore: 35, xp: 24, heldItem: 'snack' },
+      { id: 'tea-parotta', name: 'Malabar Parotta & Curry', price: 55, healthRestore: 60, xp: 40, heldItem: 'snack' },
     ],
   },
   {
@@ -1010,9 +1049,9 @@ export const CUSTOM_SHOP_PLANS: CustomShopPlan[] = [
     defaultAwning: '#f59e0b',
     description: 'Cool Kulukki Sarbath, Mango Shake & Tender Coconut kiosk along busy avenues.',
     menuItems: [
-      { id: 'juice-kulukki', name: 'Kulukki Sarbath', price: 25, healthRestore: 30, xp: 20 },
-      { id: 'juice-mango', name: 'Alphonso Mango Shake', price: 45, healthRestore: 50, xp: 32 },
-      { id: 'juice-tender', name: 'Chilled Tender Coconut', price: 35, healthRestore: 40, xp: 26 },
+      { id: 'juice-kulukki', name: 'Kulukki Sarbath', price: 25, healthRestore: 30, xp: 20, heldItem: 'juice' },
+      { id: 'juice-mango', name: 'Alphonso Mango Shake', price: 45, healthRestore: 50, xp: 32, heldItem: 'juice' },
+      { id: 'juice-tender', name: 'Chilled Tender Coconut', price: 35, healthRestore: 40, xp: 26, heldItem: 'juice' },
     ],
   },
   {
@@ -1022,9 +1061,9 @@ export const CUSTOM_SHOP_PLANS: CustomShopPlan[] = [
     defaultAwning: '#ec4899',
     description: 'Warm puffs, plum cakes, and fresh croissants loved by citizens.',
     menuItems: [
-      { id: 'bak-puff', name: 'Crispy Veg Puff', price: 30, healthRestore: 35, xp: 22 },
-      { id: 'bak-cake', name: 'Rich Chocolate Pastry', price: 50, healthRestore: 55, xp: 36 },
-      { id: 'bak-box', name: 'Celebration Sweet Box', price: 90, healthRestore: 80, xp: 60 },
+      { id: 'bak-puff', name: 'Crispy Veg Puff', price: 30, healthRestore: 35, xp: 22, heldItem: 'snack' },
+      { id: 'bak-cake', name: 'Rich Chocolate Pastry', price: 50, healthRestore: 55, xp: 36, heldItem: 'snack' },
+      { id: 'bak-box', name: 'Celebration Sweet Box', price: 90, healthRestore: 80, xp: 60, heldItem: 'snack' },
     ],
   },
   {
@@ -1034,9 +1073,9 @@ export const CUSTOM_SHOP_PLANS: CustomShopPlan[] = [
     defaultAwning: '#8b5cf6',
     description: 'Festive dresses, Kasavu wear, silk scarves & accessories.',
     menuItems: [
-      { id: 'btq-scarf', name: 'Golden Silk Scarf', price: 75, healthRestore: 20, xp: 55 },
-      { id: 'btq-shades', name: 'Designer Shades', price: 110, healthRestore: 25, xp: 75 },
-      { id: 'btq-gift', name: 'Festive Gift Hamper', price: 150, healthRestore: 40, xp: 100 },
+      { id: 'btq-scarf', name: 'Golden Silk Scarf', price: 75, healthRestore: 20, xp: 55, heldItem: 'snack' },
+      { id: 'btq-shades', name: 'Designer Shades', price: 110, healthRestore: 25, xp: 75, heldItem: 'snack' },
+      { id: 'btq-gift', name: 'Festive Gift Hamper', price: 150, healthRestore: 40, xp: 100, heldItem: 'snack' },
     ],
   },
   {
@@ -1046,22 +1085,22 @@ export const CUSTOM_SHOP_PLANS: CustomShopPlan[] = [
     defaultAwning: '#0ea5e9',
     description: 'Smartwatches, action cams & creator studio gear.',
     menuItems: [
-      { id: 'tech-buds', name: 'Studio Earbuds', price: 95, healthRestore: 15, xp: 70 },
-      { id: 'tech-watch', name: 'Valley Smart Band', price: 140, healthRestore: 30, xp: 95 },
-      { id: 'tech-lens', name: 'Creator Pro Lens', price: 210, healthRestore: 30, xp: 140 },
+      { id: 'tech-buds', name: 'Studio Earbuds', price: 95, healthRestore: 15, xp: 70, heldItem: 'latte' },
+      { id: 'tech-watch', name: 'Valley Smart Band', price: 140, healthRestore: 30, xp: 95, heldItem: 'latte' },
+      { id: 'tech-lens', name: 'Creator Pro Lens', price: 210, healthRestore: 30, xp: 140, heldItem: 'latte' },
     ],
   },
 ];
 
-// Active Enterable Buildings across Green Valley
+// Active Enterable Buildings across Green Valley (All 14 Village Hubs!)
 export const ACTIVE_BUILDINGS: ActiveBuildingDef[] = [
   {
     id: 'bldg-hospital',
     name: 'Green Valley Central Hospital',
     category: 'hospital',
     doorPosition: { x: 16, y: 0, z: -86 },
-    subtitle: '24/7 Emergency Care, Checkups & Blood Bank',
-    description: 'Step inside Green Valley Central Hospital for instant medical healing, wellness boosters, or donate blood to earn Green Coins!',
+    subtitle: '24/7 Medical Care, Checkups, Pharmacy & Doctor Salary Shift',
+    description: 'Step inside Green Valley Central Hospital for full medical treatment, checkups, blood donation, or work a Doctor Duty Shift for salary!',
     accent: '#fb7185',
     services: [
       {
@@ -1070,7 +1109,15 @@ export const ACTIVE_BUILDINGS: ActiveBuildingDef[] = [
         description: 'Instantly restores your Health to 100 HP with doctor care.',
         cost: 30,
         healthRestore: 100,
-        rewardXp: 30,
+        rewardXp: 35,
+      },
+      {
+        id: 'hosp-doctor-shift',
+        label: 'Work Duty Doctor Shift (Salary)',
+        description: 'Treat valley patients at Central Hospital and collect your Doctor Salary.',
+        cost: 0,
+        rewardCoins: 240,
+        rewardXp: 85,
       },
       {
         id: 'hosp-blood',
@@ -1082,11 +1129,110 @@ export const ACTIVE_BUILDINGS: ActiveBuildingDef[] = [
       },
       {
         id: 'hosp-tonic',
-        label: 'Energy & Immunity Booster',
+        label: 'Energy & Immunity Medicine',
         description: 'Restores +60 HP and awards +45 XP.',
-        cost: 45,
+        cost: 40,
         healthRestore: 60,
         rewardXp: 45,
+      },
+    ],
+  },
+  {
+    id: 'bldg-gym',
+    name: 'Apex Fitness & Body Building Gym',
+    category: 'gym',
+    doorPosition: { x: 68, y: 0, z: -76 },
+    subtitle: 'Body Building, Heavy Lifting & Physique Growth',
+    description: 'Train with heavy weights inside Apex Gym to visibly grow your 3D body physique (Muscle Level 0–10), restore HP, and earn Fitness XP!',
+    accent: '#22c55e',
+    services: [
+      {
+        id: 'gym-bench',
+        label: 'Heavy Bench Press & Arms (Build Body +1)',
+        description: 'Visibly builds broader shoulders & muscular arms (+1 Muscle Level, +65 HP, +80 XP).',
+        cost: 30,
+        healthRestore: 65,
+        rewardXp: 80,
+        muscleGain: 1,
+      },
+      {
+        id: 'gym-deadlift',
+        label: 'Pro Body Building Session (Build Body +2)',
+        description: 'Intense compound strength training (+2 Muscle Level, Full 100 HP, +140 XP).',
+        cost: 60,
+        healthRestore: 100,
+        rewardXp: 140,
+        muscleGain: 2,
+      },
+      {
+        id: 'gym-trainer-shift',
+        label: 'Coach New Members (Trainer Salary)',
+        description: 'Spot lifters and earn a Gym Trainer salary payout.',
+        cost: 0,
+        rewardCoins: 185,
+        rewardXp: 65,
+      },
+    ],
+  },
+  {
+    id: 'bldg-park',
+    name: 'Emerald Central Park & Pavilion',
+    category: 'park',
+    doorPosition: { x: -28, y: 0, z: 26 },
+    subtitle: 'Jogging Track, Flower Gardens, Yoga & Community Hangout',
+    description: 'Relax inside Green Valley’s lush central park — jog the emerald loop, enjoy morning yoga, or help clean the park for Green Coins!',
+    accent: '#10b981',
+    services: [
+      {
+        id: 'park-yoga',
+        label: 'Sunrise Park Yoga & Meditation (FREE)',
+        description: 'Peaceful breathing & stretch session restoring +85 HP and +55 XP.',
+        cost: 0,
+        healthRestore: 85,
+        rewardXp: 55,
+      },
+      {
+        id: 'park-jog',
+        label: 'Cardio Park Jogging Lap (Build Stamina +1)',
+        description: 'Energizing fitness run boosting vitality (+1 Muscle Level, +50 HP, +65 XP).',
+        cost: 0,
+        healthRestore: 50,
+        rewardXp: 65,
+        muscleGain: 1,
+      },
+      {
+        id: 'park-care',
+        label: 'Park Gardener Duty (Salary)',
+        description: 'Water the flower beds and tend trees for a community salary.',
+        cost: 0,
+        rewardCoins: 145,
+        rewardXp: 55,
+      },
+    ],
+  },
+  {
+    id: 'bldg-ad-center',
+    name: 'Green Valley Public Ad Center',
+    category: 'ad_center',
+    doorPosition: { x: 32, y: 0, z: 26 },
+    subtitle: 'Publish Your Own Public Ads Across Green Valley',
+    description: 'Spend Green Coins to publish your own public advertisement on village billboards & every player’s live ad feed!',
+    accent: '#f59e0b',
+    services: [
+      {
+        id: 'ad-open-studio',
+        label: 'Open Public Ad Publisher Studio',
+        description: 'Create and broadcast your own public ad across Green Valley (200 GC).',
+        cost: 0,
+        openPanel: 'ads',
+      },
+      {
+        id: 'ad-promoter-shift',
+        label: 'Work Street Ad Promoter Shift (Salary)',
+        description: 'Distribute local flyers around Central Plaza for quick salary.',
+        cost: 0,
+        rewardCoins: 155,
+        rewardXp: 50,
       },
     ],
   },
@@ -1258,44 +1404,24 @@ export const ACTIVE_BUILDINGS: ActiveBuildingDef[] = [
     ],
   },
   {
-    id: 'bldg-gym',
-    name: 'Apex Fitness & Sports Gym',
-    category: 'gym',
-    doorPosition: { x: 68, y: 0, z: -76 },
-    subtitle: 'Strength Training, Cardio & Recovery',
-    description: 'Train with Valley coaches to recover peak vitality and build XP fast.',
-    accent: '#22c55e',
-    services: [
-      {
-        id: 'gym-workout',
-        label: 'Full Body Workout Pass',
-        description: 'Restores +70 HP and earns +85 XP.',
-        cost: 35,
-        healthRestore: 70,
-        rewardXp: 85,
-      },
-      {
-        id: 'gym-coach',
-        label: 'Pro Athlete Coaching Session',
-        description: 'Full 100 HP recovery and +130 XP.',
-        cost: 65,
-        healthRestore: 100,
-        rewardXp: 130,
-      },
-    ],
-  },
-  {
     id: 'bldg-ksrtc',
     name: 'KSRTC Central Bus Terminal',
     category: 'ksrtc_depot',
     doorPosition: { x: 42, y: 0, z: 82 },
-    subtitle: 'Kerala Super Fast Express & Valley Routes',
-    description: 'Board a KSRTC Super Fast Express ticket to any major district, or walk outside to drive the iconic red-and-yellow KSRTC Bus yourself!',
+    subtitle: '24/7 Full-Time Public Bus, Conductor Salary & Express Tickets',
+    description: 'Board the live full-time running KSRTC Bus, sign on as the Bus Conductor to earn salary per minute & issue passenger tickets, or grab an instant express ride!',
     accent: '#dc2626',
     services: [
       {
+        id: 'ksrtc-live-bus',
+        label: 'Open Live KSRTC Bus & Conductor Desk',
+        description: 'Board the full-time running bus, pay fare, or work as Conductor for live salary!',
+        cost: 0,
+        openPanel: 'transit',
+      },
+      {
         id: 'ksrtc-plaza',
-        label: 'KSRTC Ticket → Central Plaza',
+        label: 'KSRTC Express → Central Plaza',
         description: 'Instant Super Fast ride to Fountain Square.',
         cost: 15,
         teleportTo: { x: 0, y: 0, z: 18 },
@@ -1303,23 +1429,15 @@ export const ACTIVE_BUILDINGS: ActiveBuildingDef[] = [
       },
       {
         id: 'ksrtc-hospital',
-        label: 'KSRTC Ticket → Central Hospital',
+        label: 'KSRTC Express → Central Hospital',
         description: 'Direct bus drop at North Medical Campus.',
         cost: 15,
         teleportTo: { x: 16, y: 0, z: -82 },
         teleportLabel: 'Central Hospital',
       },
       {
-        id: 'ksrtc-sunset',
-        label: 'KSRTC Ticket → Sunset Valley Plots',
-        description: 'Fast highway route to Sunset Valley Homes.',
-        cost: 20,
-        teleportTo: { x: -200, y: 0, z: -40 },
-        teleportLabel: 'Sunset Valley',
-      },
-      {
         id: 'ksrtc-honeymoon',
-        label: 'KSRTC Ticket → Lakeside Resort (FREE)',
+        label: 'KSRTC Express → Lakeside Resort (FREE)',
         description: 'Complimentary scenic lakeside ride to Honeymoon Resort.',
         cost: 0,
         teleportTo: { x: -78, y: 0, z: 112 },
@@ -1359,14 +1477,14 @@ export const ACTIVE_BUILDINGS: ActiveBuildingDef[] = [
     name: 'Royal Valley Wedding Mandapam',
     category: 'wedding_hall',
     doorPosition: { x: -110, y: 0, z: -20 },
-    subtitle: 'Free Single-to-Mingle Ceremonies & Grand Sadhya Feast',
-    description: 'Celebrate marriages for FREE under floral canopies with Kerala Sadhya, Malabar Biryani, Payasam & community blessings!',
+    subtitle: 'Live Mingle Screen · Free Marriages & Food For Everyone',
+    description: 'Watch the Giant Live Mingle Screen, auto-select couples for FREE, serve Grand Sadhya Food to ALL citizens, and enjoy a FREE Honeymoon!',
     accent: '#f43f5e',
     services: [
       {
         id: 'wed-open-mingle',
-        label: 'Open Free Single-to-Mingle & Marriage Hall',
-        description: 'See all joined accounts, auto-select 2 accounts for free, view DPs & marry.',
+        label: 'Open Free Single-to-Mingle & Live Screen',
+        description: 'See all joined names & IDs, watch live selection + Insta DPs, and marry for FREE.',
         cost: 0,
         openPanel: 'mingle',
       },
@@ -1403,9 +1521,198 @@ export const ACTIVE_BUILDINGS: ActiveBuildingDef[] = [
         cost: 0,
         healthRestore: 100,
         rewardXp: 95,
+        heldItem: 'tea',
       },
     ],
   },
+  {
+    id: 'bldg-govt',
+    name: 'Green Valley Government Services Hall',
+    category: 'government',
+    doorPosition: { x: -34, y: 0, z: -56 },
+    subtitle: 'Panchayat, Passport, Driving License, Police, Land Registry & Welfare',
+    description: 'Complete all official Green Valley civic & government services: Citizen ID & Passport, Driving License, Land Registry, Utility Bills, Police Aid & Public Pension.',
+    accent: '#0ea5e9',
+    services: [
+      {
+        id: 'govt-passport',
+        label: 'Apply Citizen ID & Valley Passport',
+        description: 'Official biometric citizen registration (+90 XP, verified citizen badge).',
+        cost: 40,
+        rewardXp: 90,
+      },
+      {
+        id: 'govt-license',
+        label: 'Driving License & KSRTC Permit',
+        description: 'Issue official heavy & light motor driving license (+85 XP).',
+        cost: 50,
+        rewardXp: 85,
+      },
+      {
+        id: 'govt-registry',
+        label: 'Land & Property Deed Registration',
+        description: 'Register homes & commercial shops at the Sub-Registrar Desk (+75 XP).',
+        cost: 35,
+        rewardXp: 75,
+      },
+      {
+        id: 'govt-welfare',
+        label: 'Collect Public Welfare Pension & Aid',
+        description: 'Citizen welfare grant from Green Valley Panchayat (+160 GC, +40 XP).',
+        cost: 0,
+        rewardCoins: 160,
+        rewardXp: 40,
+      },
+      {
+        id: 'govt-police',
+        label: 'Civic Police & Emergency Aid Desk',
+        description: 'Safety briefing & emergency first-aid kit (+50 HP, +45 XP).',
+        cost: 0,
+        healthRestore: 50,
+        rewardXp: 45,
+      },
+      {
+        id: 'govt-utility',
+        label: 'Electricity & Water Utility Clearance',
+        description: 'Clear municipal utility dues and earn clean-city bonus (+55 XP).',
+        cost: 20,
+        rewardXp: 55,
+      },
+    ],
+  },
+  {
+    id: 'bldg-game-center',
+    name: 'Typixel Grand Game Center (50+ Games)',
+    category: 'game_center',
+    doorPosition: { x: 34, y: 0, z: 54 },
+    subtitle: '54 Playable Arcade, Reflex, Puzzle & Strategy Games · VIP Entrance Card Required',
+    description: 'The ultimate mega arcade! Find the hidden VIP Entrance Card at the high-risk cliff to unlock entry and play 50+ games at super cheap rates (5–15 GC).',
+    accent: '#a855f7',
+    services: [
+      {
+        id: 'gc-enter',
+        label: 'Enter Grand Game Center Lobby (50+ Games)',
+        description: 'Requires Hidden VIP Entrance Card. Play 54 mini-games at cheap 5–15 GC rates!',
+        cost: 0,
+        openPanel: 'game_center',
+      },
+    ],
+  },
+  {
+    id: 'bldg-chaya-plaza',
+    name: 'Central Plaza Samovar Tea Stall',
+    category: 'mall',
+    doorPosition: { x: -20, y: 0, z: -18 },
+    subtitle: '24/7 Active Public Tea Stall · Hold & Drink Hot Chai in Hand!',
+    description: 'Order hot Kerala Samovar Masala Chai, Sulaimani, or Pazham Pori — visibly hold and drink it right in your 3D character hand!',
+    accent: '#f97316',
+    services: [
+      {
+        id: 'plaza-chai',
+        label: 'Hot Samovar Masala Chai (Drink in Hand)',
+        description: 'Hold & sip steaming chai in your hand (+30 HP, +20 XP).',
+        cost: 15,
+        healthRestore: 30,
+        rewardXp: 20,
+        heldItem: 'tea',
+      },
+      {
+        id: 'plaza-latte',
+        label: 'Iced Valley Filter Coffee (Drink in Hand)',
+        description: 'Refresh with filter coffee in hand (+35 HP, +25 XP).',
+        cost: 25,
+        healthRestore: 35,
+        rewardXp: 25,
+        heldItem: 'latte',
+      },
+      {
+        id: 'plaza-juice',
+        label: 'Fresh Kulukki Sarbath (Drink in Hand)',
+        description: 'Chilled spiced lime sarbath (+40 HP, +25 XP).',
+        cost: 20,
+        healthRestore: 40,
+        rewardXp: 25,
+        heldItem: 'juice',
+      },
+      {
+        id: 'plaza-snack',
+        label: 'Hot Pazham Pori & Samosa Plate (Eat in Hand)',
+        description: 'Crispy evening snacks (+45 HP, +30 XP).',
+        cost: 30,
+        healthRestore: 45,
+        rewardXp: 30,
+        heldItem: 'snack',
+      },
+    ],
+  },
+];
+
+// 54 Playable Mini-Games inside the Grand Game Center (Cheap 5–15 GC entry, fair prizes!)
+export const GAME_CENTER_GAMES: MiniGameDef[] = [
+  // Reflex (6)
+  { id: 'gc-01', title: 'Lightning Tap Sprint', category: 'Reflex', engine: 'reflex', entryFee: 5, winPrize: 25, tagline: 'React the instant the light turns emerald!', accent: '#10b981' },
+  { id: 'gc-02', title: 'Neon Laser Dodge', category: 'Reflex', engine: 'reflex', entryFee: 6, winPrize: 28, tagline: 'Hit the shield before the neon beam fires.', accent: '#06b6d4' },
+  { id: 'gc-03', title: 'KSRTC Brake Check', category: 'Reflex', engine: 'reflex', entryFee: 5, winPrize: 24, tagline: 'Slam the bus brakes at the green signal!', accent: '#ef4444' },
+  { id: 'gc-04', title: 'Samovar Tea Catch', category: 'Reflex', engine: 'reflex', entryFee: 5, winPrize: 25, tagline: 'Catch the meter-pour chai on time.', accent: '#f59e0b' },
+  { id: 'gc-05', title: 'Thunderbolt Trigger', category: 'Reflex', engine: 'reflex', entryFee: 8, winPrize: 34, tagline: 'Sub-350ms reflex showdown.', accent: '#8b5cf6' },
+  { id: 'gc-06', title: 'SkyCab Runway Launch', category: 'Reflex', engine: 'reflex', entryFee: 7, winPrize: 30, tagline: 'Engage thrusters the moment clearance flashes.', accent: '#facc15' },
+  // Timing (6)
+  { id: 'gc-07', title: 'Precision Bar Lock', category: 'Arcade', engine: 'timing', entryFee: 5, winPrize: 26, tagline: 'Stop the moving needle inside the golden zone.', accent: '#f59e0b' },
+  { id: 'gc-08', title: 'Penalty Kick Meter', category: 'Sports', engine: 'timing', entryFee: 8, winPrize: 36, tagline: 'Time your football power bar for top-corner goal!', accent: '#22c55e' },
+  { id: 'gc-09', title: 'Volleyball Spike Timing', category: 'Sports', engine: 'timing', entryFee: 8, winPrize: 36, tagline: 'Smash the volley right at peak height.', accent: '#38bdf8' },
+  { id: 'gc-10', title: 'Cricket Sixer Sweetspot', category: 'Sports', engine: 'timing', entryFee: 8, winPrize: 38, tagline: 'Swing the bat right on the green pitch mark.', accent: '#10b981' },
+  { id: 'gc-11', title: 'Safe Cracker Dial', category: 'Arcade', engine: 'timing', entryFee: 10, winPrize: 42, tagline: 'Lock the vault tumbler at dead center.', accent: '#eab308' },
+  { id: 'gc-12', title: 'Archery Bullseye Pulse', category: 'Sports', engine: 'timing', entryFee: 7, winPrize: 32, tagline: 'Release the bowstring at maximum steadiness.', accent: '#fb7185' },
+  // Math (6)
+  { id: 'gc-13', title: 'Turbo Arithmetic Blitz', category: 'Math', engine: 'math', entryFee: 5, winPrize: 26, tagline: 'Solve 3 rapid-fire equations to win!', accent: '#38bdf8' },
+  { id: 'gc-14', title: 'Green Coin Cashier', category: 'Math', engine: 'math', entryFee: 5, winPrize: 25, tagline: 'Calculate exact change for village shoppers.', accent: '#10b981' },
+  { id: 'gc-15', title: 'Rocket Fuel Calculator', category: 'Math', engine: 'math', entryFee: 8, winPrize: 36, tagline: 'Compute propulsion numbers before liftoff.', accent: '#6366f1' },
+  { id: 'gc-16', title: 'Multiplier Madness', category: 'Math', engine: 'math', entryFee: 7, winPrize: 32, tagline: 'Fast mental multiplication challenge.', accent: '#ec4899' },
+  { id: 'gc-17', title: 'Bank Vault Equations', category: 'Math', engine: 'math', entryFee: 9, winPrize: 40, tagline: 'Crack 3 numeric security sums.', accent: '#14b8a6' },
+  { id: 'gc-18', title: 'Quantum Sum Duel', category: 'Math', engine: 'math', entryFee: 10, winPrize: 45, tagline: 'High-speed brain math arena.', accent: '#a855f7' },
+  // Memory (6)
+  { id: 'gc-19', title: 'Emerald Card Flip', category: 'Memory', engine: 'memory', entryFee: 6, winPrize: 30, tagline: 'Match all 6 hidden icon pairs in 14 moves.', accent: '#10b981' },
+  { id: 'gc-20', title: 'Fruit Market Memory', category: 'Memory', engine: 'memory', entryFee: 5, winPrize: 26, tagline: 'Pair matching tropical fruits cleanly.', accent: '#f97316' },
+  { id: 'gc-21', title: 'Neon Cyber Pairs', category: 'Memory', engine: 'memory', entryFee: 7, winPrize: 34, tagline: 'Decode matching arcade symbols.', accent: '#06b6d4' },
+  { id: 'gc-22', title: 'Royal Palace Jewels', category: 'Memory', engine: 'memory', entryFee: 8, winPrize: 38, tagline: 'Uncover paired crowns & gems.', accent: '#eab308' },
+  { id: 'gc-23', title: 'Stadium Trophy Match', category: 'Memory', engine: 'memory', entryFee: 6, winPrize: 30, tagline: 'Match sports gear pairs before tries run out.', accent: '#22c55e' },
+  { id: 'gc-24', title: 'Kerala Snacks Match', category: 'Memory', engine: 'memory', entryFee: 5, winPrize: 25, tagline: 'Pair chai, banana chips & snacks!', accent: '#e11d48' },
+  // Clicker / Tycoon (6)
+  { id: 'gc-25', title: 'Chai Pour Frenzy', category: 'Tycoon', engine: 'clicker', entryFee: 5, winPrize: 26, tagline: 'Pour 20 cups of Masala Chai in 8 seconds!', accent: '#f97316' },
+  { id: 'gc-26', title: 'Gold Coin Miner', category: 'Tycoon', engine: 'clicker', entryFee: 6, winPrize: 30, tagline: 'Tap fast to excavate 22 crystal coins!', accent: '#f59e0b' },
+  { id: 'gc-27', title: 'Turbo Gym Reps', category: 'Sports', engine: 'clicker', entryFee: 6, winPrize: 28, tagline: 'Complete 20 bench-press reps before the buzzer!', accent: '#22c55e' },
+  { id: 'gc-28', title: 'Pixel Art Printer', category: 'Tycoon', engine: 'clicker', entryFee: 7, winPrize: 32, tagline: 'Render 22 Typixel posters before deadline.', accent: '#ec4899' },
+  { id: 'gc-29', title: 'Coconut Harvest Tap', category: 'Tycoon', engine: 'clicker', entryFee: 5, winPrize: 24, tagline: 'Harvest 18 coconuts in 8 seconds!', accent: '#10b981' },
+  { id: 'gc-30', title: 'Bus Ticket Stamper', category: 'Arcade', engine: 'clicker', entryFee: 5, winPrize: 26, tagline: 'Stamp 20 KSRTC tickets at rush hour!', accent: '#dc2626' },
+  // Trivia (6)
+  { id: 'gc-31', title: 'Green Valley Quiz', category: 'Trivia', engine: 'trivia', entryFee: 5, winPrize: 28, tagline: 'Answer 2 rapid knowledge questions correctly.', accent: '#38bdf8' },
+  { id: 'gc-32', title: 'World Geography Dash', category: 'Trivia', engine: 'trivia', entryFee: 6, winPrize: 30, tagline: 'Test your capitals & continents knowledge.', accent: '#10b981' },
+  { id: 'gc-33', title: 'Tech & Design Trivia', category: 'Trivia', engine: 'trivia', entryFee: 7, winPrize: 34, tagline: 'Questions for creators & engineers.', accent: '#8b5cf6' },
+  { id: 'gc-34', title: 'Football World Cup Quiz', category: 'Sports', engine: 'trivia', entryFee: 6, winPrize: 32, tagline: 'Prove your football legend knowledge.', accent: '#22c55e' },
+  { id: 'gc-35', title: 'Space & Science Quest', category: 'Trivia', engine: 'trivia', entryFee: 7, winPrize: 34, tagline: 'Planets, physics, and cosmic facts.', accent: '#6366f1' },
+  { id: 'gc-36', title: 'Kerala Heritage Trivia', category: 'Trivia', engine: 'trivia', entryFee: 5, winPrize: 28, tagline: 'Festivals, backwaters & local culture.', accent: '#f59e0b' },
+  // Strategy RPS (5)
+  { id: 'gc-37', title: 'Rock Paper Scissors Pro', category: 'Strategy', engine: 'rps', entryFee: 5, winPrize: 24, tagline: 'Outsmart the arcade bot in Best-of-3!', accent: '#fb7185' },
+  { id: 'gc-38', title: 'Elemental Clash', category: 'Strategy', engine: 'rps', entryFee: 8, winPrize: 36, tagline: 'Fire, Water, Forest tactical duel.', accent: '#f97316' },
+  { id: 'gc-39', title: 'Knight Archer Mage', category: 'Strategy', engine: 'rps', entryFee: 9, winPrize: 40, tagline: 'Classic medieval triad battle.', accent: '#8b5cf6' },
+  { id: 'gc-40', title: 'Cyber Firewall Duel', category: 'Strategy', engine: 'rps', entryFee: 10, winPrize: 42, tagline: 'Shield, Hack, or Patch to victory.', accent: '#06b6d4' },
+  { id: 'gc-41', title: 'Street Fighter Read', category: 'Arcade', engine: 'rps', entryFee: 7, winPrize: 32, tagline: 'Strike, Block, or Throw — read the AI!', accent: '#ef4444' },
+  // Number Guess / Strategy (5)
+  { id: 'gc-42', title: 'Vault Code Hunter', category: 'Strategy', engine: 'guess', entryFee: 5, winPrize: 30, tagline: 'Find the secret number (1–20) in 4 tries.', accent: '#10b981' },
+  { id: 'gc-43', title: 'Treasure Depth Radar', category: 'Arcade', engine: 'guess', entryFee: 6, winPrize: 32, tagline: 'Pinpoint the submerged chest depth.', accent: '#0ea5e9' },
+  { id: 'gc-44', title: 'Pin Code Hacker', category: 'Strategy', engine: 'guess', entryFee: 8, winPrize: 38, tagline: 'Use High/Low clues to crack the code.', accent: '#a855f7' },
+  { id: 'gc-45', title: 'Crystal Compass Guess', category: 'Arcade', engine: 'guess', entryFee: 7, winPrize: 34, tagline: 'Locate the hidden ridge coordinate.', accent: '#f59e0b' },
+  { id: 'gc-46', title: 'Mystery Box Oracle', category: 'Dice & Cards', engine: 'guess', entryFee: 10, winPrize: 45, tagline: 'Deduce the lucky box number in 4 shots.', accent: '#ec4899' },
+  // Word Scramble (4)
+  { id: 'gc-47', title: 'Typixel Word Scramble', category: 'Word', engine: 'word', entryFee: 5, winPrize: 28, tagline: 'Unscramble the hidden village word!', accent: '#14b8a6' },
+  { id: 'gc-48', title: 'Neon Anagram Rush', category: 'Word', engine: 'word', entryFee: 6, winPrize: 32, tagline: 'Decode the jumbled letters fast.', accent: '#8b5cf6' },
+  { id: 'gc-49', title: 'Travel City Jumble', category: 'Word', engine: 'word', entryFee: 7, winPrize: 34, tagline: 'Unscramble famous world landmarks.', accent: '#38bdf8' },
+  { id: 'gc-50', title: 'Sports Star Letters', category: 'Word', engine: 'word', entryFee: 6, winPrize: 30, tagline: 'Solve the athletic vocabulary scramble.', accent: '#22c55e' },
+  // Dice & Cards (4)
+  { id: 'gc-51', title: 'High-Low Twin Dice', category: 'Dice & Cards', engine: 'dice', entryFee: 8, winPrize: 34, tagline: 'Predict whether twin dice roll High (8–12) or Low (2–6)!', accent: '#f59e0b' },
+  { id: 'gc-52', title: 'Golden Seven Roll', category: 'Dice & Cards', engine: 'dice', entryFee: 10, winPrize: 46, tagline: 'Call your dice range and double up!', accent: '#eab308' },
+  { id: 'gc-53', title: 'Emerald Card Draw', category: 'Dice & Cards', engine: 'dice', entryFee: 9, winPrize: 38, tagline: 'Predict High or Low on the casino deck.', accent: '#10b981' },
+  { id: 'gc-54', title: 'Royal Villa Lucky Dice', category: 'Dice & Cards', engine: 'dice', entryFee: 15, winPrize: 65, tagline: 'VIP high-roller dice showdown at cheap rates!', accent: '#ec4899' },
 ];
 
 // Single-to-Mingle Wedding Feast Menu & Hourly Matchmaking Venues

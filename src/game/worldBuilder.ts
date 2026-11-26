@@ -1,14 +1,19 @@
 import * as THREE from 'three';
-import type { CustomHomeDef, CustomShopDef } from '../shared/types.ts';
+import type { CustomHomeDef, CustomShopDef, MingleEventState } from '../shared/types.ts';
 import {
   ACTIVE_BUILDINGS,
   ATM_LOCATIONS,
   BUSINESSES,
   CUSTOM_HOME_PLANS,
   CUSTOM_SHOP_PLANS,
+  HIDDEN_CARD_POS,
   NPCS,
+  PALACE_VILLAS,
   PROPERTIES,
+  SHOP_SIZE_TIERS,
   SHOWCASE_ADS,
+  VOLLEYBALL_COURT_CENTER,
+  WORLD_HALF_SIZE,
   groundHeightAt,
 } from '../shared/worldData.ts';
 import type { WorldPhysics } from './physics.ts';
@@ -35,6 +40,11 @@ export interface WorldHandles {
   npcRigs: { id: string; rig: CharacterRig; baseRotY: number }[];
   missionBeacon: THREE.Group;
   propertySigns: Map<string, THREE.Mesh>;
+  villaSigns: Map<string, THREE.Mesh>;
+  hiddenCardGroup: THREE.Group;
+  boundaryGroup: THREE.Group;
+  updateBoundaryRing: (halfSize: number) => void;
+  updateMingleScreen: (ev: MingleEventState) => void;
   sailboat: THREE.Group;
   campfireGlow: THREE.Mesh;
   dispose: () => void;
@@ -97,11 +107,10 @@ export function buildGreenValleyWorld(
   );
 
   // =========================================================================
-  // 1. SCULPTED 840m x 840m VALLEY TERRAIN + OUTER MOUNTAIN RING
+  // 1. EXPANDED 2100m x 2100m VALLEY TERRAIN (Admin expandable up to +-950m)
   // =========================================================================
-  grassTex.repeat.set(78, 78);
-  // Optimized 96x96 terrain grid for fast startup while preserving smooth hills & lake basin
-  const terrainGeo = track(new THREE.PlaneGeometry(980, 980, 96, 96));
+  grassTex.repeat.set(160, 160);
+  const terrainGeo = track(new THREE.PlaneGeometry(2100, 2100, 112, 112));
   terrainGeo.rotateX(-Math.PI / 2);
   const posAttr = terrainGeo.attributes.position;
   const colors = new Float32Array(posAttr.count * 3);
@@ -171,15 +180,15 @@ export function buildGreenValleyWorld(
   waterMesh.receiveShadow = true;
   root.add(waterMesh);
 
-  // Distant Snow-Capped Mountain Ring (Natural Horizon Perimeter around 840m valley)
+  // Distant Snow-Capped Mountain Ring (pushed to 980m so Admin can expand village smoothly)
   const mountainMat = track(new THREE.MeshStandardMaterial({ color: '#6b7b84', roughness: 0.94 }));
   const snowCapMat = track(new THREE.MeshStandardMaterial({ color: '#f1f5f9', roughness: 0.8 }));
-  const mtnCount = 44;
+  const mtnCount = 48;
   for (let i = 0; i < mtnCount; i++) {
     const angle = (i / mtnCount) * Math.PI * 2;
-    const dist = 445 + (i % 3) * 32;
-    const height = 58 + ((i * 23) % 44);
-    const radius = 44 + ((i * 15) % 24);
+    const dist = 975 + (i % 3) * 38;
+    const height = 92 + ((i * 23) % 58);
+    const radius = 72 + ((i * 15) % 34);
     const mGroup = new THREE.Group();
     mGroup.position.set(Math.cos(angle) * dist, -2, Math.sin(angle) * dist);
     const base = new THREE.Mesh(track(new THREE.ConeGeometry(radius, height, 7)), mountainMat);
@@ -194,6 +203,35 @@ export function buildGreenValleyWorld(
     mGroup.add(base, cap);
     root.add(mGroup);
   }
+
+  // Dynamic Village Boundary Ring (updates live when Admin expands village size)
+  const boundaryGroup = new THREE.Group();
+  const boundaryLineMat = track(
+    new THREE.MeshBasicMaterial({ color: '#10b981', transparent: true, opacity: 0.38, side: THREE.DoubleSide }),
+  );
+  const bNorth = new THREE.Mesh(track(new THREE.PlaneGeometry(1, 2.2)), boundaryLineMat);
+  const bSouth = new THREE.Mesh(track(new THREE.PlaneGeometry(1, 2.2)), boundaryLineMat);
+  const bEast = new THREE.Mesh(track(new THREE.PlaneGeometry(2.2, 1)), boundaryLineMat);
+  const bWest = new THREE.Mesh(track(new THREE.PlaneGeometry(2.2, 1)), boundaryLineMat);
+  bNorth.rotation.x = -Math.PI / 2;
+  bSouth.rotation.x = -Math.PI / 2;
+  bEast.rotation.x = -Math.PI / 2;
+  bWest.rotation.x = -Math.PI / 2;
+  boundaryGroup.add(bNorth, bSouth, bEast, bWest);
+  root.add(boundaryGroup);
+
+  const updateBoundaryRing = (halfSize: number) => {
+    const span = halfSize * 2;
+    bNorth.scale.set(span, 1, 1);
+    bNorth.position.set(0, 0.35, -halfSize);
+    bSouth.scale.set(span, 1, 1);
+    bSouth.position.set(0, 0.35, halfSize);
+    bEast.scale.set(1, span, 1);
+    bEast.position.set(halfSize, 0.35, 0);
+    bWest.scale.set(1, span, 1);
+    bWest.position.set(-halfSize, 0.35, 0);
+  };
+  updateBoundaryRing(WORLD_HALF_SIZE);
 
   // =========================================================================
   // 2. LONG SCENIC HIGHWAY NETWORK, BRIDGES & CENTRAL FOUNTAIN PLAZA
@@ -737,13 +775,31 @@ export function buildGreenValleyWorld(
     root.add(crossbar, postL, postR);
   }
 
-  // Basketball Court + Fitness Gym
-  const bballCourt = new THREE.Mesh(
-    track(new THREE.BoxGeometry(14, 0.16, 9)),
-    track(new THREE.MeshStandardMaterial({ color: '#c2410c', roughness: 0.8 })),
+  // Playable 3D Volleyball Court (with Sand Floor, Twin Poles & Stretched Net)
+  const vbCenter = VOLLEYBALL_COURT_CENTER;
+  const vbSand = new THREE.Mesh(
+    track(new THREE.BoxGeometry(16, 0.16, 10)),
+    track(new THREE.MeshStandardMaterial({ color: '#e5c99b', roughness: 0.92 })),
   );
-  bballCourt.position.set(48, 0.08, -82);
-  root.add(bballCourt);
+  vbSand.position.set(vbCenter.x, 0.08, vbCenter.z);
+  vbSand.receiveShadow = true;
+  const vbPoleL = new THREE.Mesh(track(new THREE.CylinderGeometry(0.1, 0.1, 3.0, 8)), darkMetalMat);
+  vbPoleL.position.set(vbCenter.x, 1.5, vbCenter.z - 5.0);
+  const vbPoleR = vbPoleL.clone();
+  vbPoleR.position.z = vbCenter.z + 5.0;
+  const vbNet = new THREE.Mesh(
+    track(new THREE.BoxGeometry(0.1, 1.15, 10.0)),
+    track(
+      new THREE.MeshStandardMaterial({
+        color: '#f8fafc',
+        transparent: true,
+        opacity: 0.78,
+        roughness: 0.6,
+      }),
+    ),
+  );
+  vbNet.position.set(vbCenter.x, 2.3, vbCenter.z);
+  root.add(vbSand, vbPoleL, vbPoleR, vbNet);
 
   addBuilding({
     id: 'bldg-gym',
@@ -1001,6 +1057,315 @@ export function buildGreenValleyWorld(
   addSignboard(hmGroup, 'LAKESIDE HONEYMOON RESORT', 'Romantic Suite & Sunset Dining', 0, 4.7, -2.0, 8.8, 1.9, Math.PI, '#ec4899');
   root.add(hmGroup);
   physics.addStaticBox('bldg-honeymoon-resort', -78, 3.0, 119.8, 10.5, 6, 8);
+
+  // Giant 3D Live Single-to-Mingle Screen next to Wedding Mandapam (names, @IDs & selected couple)
+  const mingleCanvas = document.createElement('canvas');
+  mingleCanvas.width = 768;
+  mingleCanvas.height = 420;
+  const mingleTex = track(new THREE.CanvasTexture(mingleCanvas));
+  mingleTex.colorSpace = THREE.SRGBColorSpace;
+  const mingleScreenMat = track(
+    new THREE.MeshStandardMaterial({
+      map: mingleTex,
+      emissive: '#ffffff',
+      emissiveMap: mingleTex,
+      emissiveIntensity: 0.35,
+      roughness: 0.3,
+    }),
+  );
+  const mingleStand = new THREE.Group();
+  mingleStand.position.set(-96, 0, -14);
+  mingleStand.rotation.y = Math.PI * 0.25;
+  const mPoleL = new THREE.Mesh(track(new THREE.CylinderGeometry(0.22, 0.25, 5.2, 8)), darkMetalMat);
+  mPoleL.position.set(-3.4, 2.6, 0);
+  const mPoleR = mPoleL.clone();
+  mPoleR.position.x = 3.4;
+  const mFrame = new THREE.Mesh(track(new THREE.BoxGeometry(8.8, 5.0, 0.4)), darkMetalMat);
+  mFrame.position.set(0, 6.2, 0);
+  const mPlane = new THREE.Mesh(track(new THREE.PlaneGeometry(8.3, 4.55)), mingleScreenMat);
+  mPlane.position.set(0, 6.2, 0.24);
+  mingleStand.add(mPoleL, mPoleR, mFrame, mPlane);
+  root.add(mingleStand);
+
+  const updateMingleScreen = (ev: MingleEventState) => {
+    const ctx = mingleCanvas.getContext('2d');
+    if (!ctx) return;
+    ctx.fillStyle = '#0b1016';
+    ctx.fillRect(0, 0, 768, 420);
+    ctx.strokeStyle = '#f43f5e';
+    ctx.lineWidth = 6;
+    ctx.strokeRect(10, 10, 748, 400);
+
+    ctx.fillStyle = '#f43f5e';
+    ctx.font = 'bold 28px sans-serif';
+    ctx.fillText('SINGLE-TO-MINGLE LIVE STAGE', 32, 54);
+
+    const secsLeft = Math.max(0, Math.floor((ev.nextEventAtMs - Date.now()) / 1000));
+    const mm = String(Math.floor(secsLeft / 60)).padStart(2, '0');
+    const ss = String(secsLeft % 60).padStart(2, '0');
+    ctx.fillStyle = '#fbbf24';
+    ctx.font = 'bold 22px sans-serif';
+    ctx.fillText(`NEXT DRAW: ${mm}:${ss}`, 530, 54);
+
+    if (ev.selectedPair) {
+      ctx.fillStyle = '#1e1b2e';
+      ctx.fillRect(32, 74, 704, 118);
+      ctx.fillStyle = '#fda4af';
+      ctx.font = 'bold 20px sans-serif';
+      ctx.fillText(`SELECTED PAIR · ${ev.selectedPair.status.toUpperCase()}`, 50, 106);
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 28px sans-serif';
+      const a = ev.selectedPair.memberA;
+      const b = ev.selectedPair.memberB;
+      ctx.fillText(`${a.displayName} (@${a.instagramId || 'citizen'})  ♥  ${b.displayName} (@${b.instagramId || 'citizen'})`, 50, 154);
+    }
+
+    const list = ev.joinedAccounts || [];
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = 'bold 18px sans-serif';
+    ctx.fillText(`JOINED POOL (${list.length})`, 32, 224);
+    ctx.fillStyle = '#e2e8f0';
+    ctx.font = '18px sans-serif';
+    list.slice(0, 8).forEach((p, idx) => {
+      const col = idx % 2;
+      const row = Math.floor(idx / 2);
+      ctx.fillText(
+        `• ${p.displayName} (@${p.instagramId || 'user'})`,
+        36 + col * 355,
+        258 + row * 34,
+      );
+    });
+    if (list.length === 0) {
+      ctx.fillStyle = '#64748b';
+      ctx.fillText('Press E at Wedding Mandapam to Join for FREE!', 36, 266);
+    }
+    mingleTex.needsUpdate = true;
+  };
+  updateMingleScreen({
+    nextEventAtMs: Date.now() + 300000,
+    alarmActive: false,
+    locationName: 'Royal Wedding Mandapam',
+    locationPos: { x: -110, y: 0, z: -20 },
+    activeMatch: null,
+  });
+
+  // =========================================================================
+  // 8D. TURN 11 CIVIC LANDMARKS: GOVERNMENT HALL, GRAND GAME CENTER, AD CENTER, PARK & PLAZA CHAYA KADA
+  // =========================================================================
+  addBuilding({
+    id: 'bldg-govt',
+    name: 'GOVERNMENT SERVICES HALL',
+    subtitle: 'Civic ID · Land Deeds · Trade Permits',
+    x: -54,
+    z: -124,
+    w: 22,
+    h: 10.5,
+    d: 14,
+    color: '#f1f5f9',
+    roofColor: '#0284c7',
+    accent: '#0ea5e9',
+  });
+  addBuilding({
+    id: 'bldg-game-center',
+    name: 'GRAND GAME CENTER',
+    subtitle: '50+ Arcade Games · VIP Card Entry',
+    x: 92,
+    z: 36,
+    w: 24,
+    h: 9.8,
+    d: 16,
+    color: '#1e1b4b',
+    roofColor: '#7c3aed',
+    accent: '#a855f7',
+  });
+  addBuilding({
+    id: 'bldg-ad-center',
+    name: 'PUBLIC AD CENTER',
+    subtitle: 'Publish Village Billboards & Promos',
+    x: 42,
+    z: -32,
+    w: 14,
+    h: 7.2,
+    d: 10,
+    color: '#1e293b',
+    roofColor: '#db2777',
+    accent: '#ec4899',
+  });
+  // Central Plaza Public Tea Stall (bldg-chaya-plaza)
+  addBuilding({
+    id: 'bldg-chaya-plaza',
+    name: 'PLAZA SAMOVAR TEA STALL',
+    subtitle: 'Hot Chaya · Sulaimani · Pazham Pori',
+    x: 24,
+    z: 18,
+    w: 8.5,
+    h: 4.5,
+    d: 6.5,
+    color: '#fef3c7',
+    roofColor: '#d97706',
+    accent: '#f59e0b',
+    pitchedRoof: true,
+  });
+  // Emerald Central Park Gazebo (bldg-park)
+  const parkGroup = new THREE.Group();
+  parkGroup.position.set(-28, 0, 26);
+  const parkLawn = new THREE.Mesh(
+    track(new THREE.CylinderGeometry(11, 11.2, 0.16, 24)),
+    track(new THREE.MeshStandardMaterial({ color: '#22c55e', roughness: 0.9 })),
+  );
+  parkLawn.position.y = 0.08;
+  const gazeboRoof = new THREE.Mesh(track(new THREE.ConeGeometry(4.2, 2.2, 8)), roseMat);
+  gazeboRoof.position.y = 4.2;
+  parkGroup.add(parkLawn, gazeboRoof);
+  for (let i = 0; i < 6; i++) {
+    const a = (i / 6) * Math.PI * 2;
+    const gp = new THREE.Mesh(track(new THREE.CylinderGeometry(0.12, 0.14, 3.2, 8)), creamWallMat);
+    gp.position.set(Math.cos(a) * 3.1, 1.6, Math.sin(a) * 3.1);
+    parkGroup.add(gp);
+  }
+  addSignboard(parkGroup, 'EMERALD CENTRAL PARK', 'Relax · Picnic · Full Rest', 0, 3.3, 4.4, 6.2, 1.4, 0, '#10b981');
+  root.add(parkGroup);
+
+  // =========================================================================
+  // 8E. MONUMENTAL WALLED PALACE VILLAS: HASHIM'S VILLA & RIFAD'S VILLA
+  // =========================================================================
+  const villaSigns = new Map<string, THREE.Mesh>();
+  const marbleWallMat = track(new THREE.MeshStandardMaterial({ color: '#f8f5ef', roughness: 0.62 }));
+  const compoundWallMat = track(new THREE.MeshStandardMaterial({ color: '#e2dcd0', roughness: 0.78 }));
+
+  for (const villa of PALACE_VILLAS) {
+    const vg = new THREE.Group();
+    const gy = Math.max(0, groundHeightAt(villa.x, villa.z));
+    vg.position.set(villa.x, gy, villa.z);
+
+    const hw = villa.wallSize.w * 0.5;
+    const hd = villa.wallSize.d * 0.5;
+    const wallH = 5.2;
+    const wallT = 1.1;
+    const gateW = 9.0;
+    const frontSegW = (villa.wallSize.w - gateW) * 0.5;
+
+    // Monumental Perimeter Compound Walls (Back, Left, Right, Split Front with Grand Arch Gate)
+    const backW = new THREE.Mesh(track(new THREE.BoxGeometry(villa.wallSize.w, wallH, wallT)), compoundWallMat);
+    backW.position.set(0, wallH * 0.5, -hd);
+    backW.castShadow = true;
+    const leftW = new THREE.Mesh(track(new THREE.BoxGeometry(wallT, wallH, villa.wallSize.d)), compoundWallMat);
+    leftW.position.set(-hw, wallH * 0.5, 0);
+    leftW.castShadow = true;
+    const rightW = leftW.clone();
+    rightW.position.x = hw;
+    const frontL = new THREE.Mesh(track(new THREE.BoxGeometry(frontSegW, wallH, wallT)), compoundWallMat);
+    frontL.position.set(-hw + frontSegW * 0.5, wallH * 0.5, hd);
+    frontL.castShadow = true;
+    const frontR = frontL.clone();
+    frontR.position.x = hw - frontSegW * 0.5;
+
+    // Gold Trim Coping along top of perimeter walls
+    const copingBack = new THREE.Mesh(track(new THREE.BoxGeometry(villa.wallSize.w + 0.4, 0.35, wallT + 0.3)), goldMat);
+    copingBack.position.set(0, wallH + 0.18, -hd);
+
+    // Grand Arched Front Gate + Dynamic Board Sign (Hashim's Villa / Rifad's Villa)
+    const gatePillarL = new THREE.Mesh(track(new THREE.BoxGeometry(1.8, 7.6, 1.8)), marbleWallMat);
+    gatePillarL.position.set(-gateW * 0.5, 3.8, hd);
+    const gatePillarR = gatePillarL.clone();
+    gatePillarR.position.x = gateW * 0.5;
+    const gateBeam = new THREE.Mesh(track(new THREE.BoxGeometry(gateW + 2.6, 1.6, 2.0)), darkMetalMat);
+    gateBeam.position.set(0, 7.9, hd);
+    const gateGoldCap = new THREE.Mesh(track(new THREE.BoxGeometry(gateW + 3.0, 0.35, 2.2)), goldMat);
+    gateGoldCap.position.set(0, 8.85, hd);
+
+    const vSign = addSignboard(
+      vg,
+      villa.boardName.toUpperCase(),
+      `@${villa.ownerUsername} · Palace Estate`,
+      0,
+      7.9,
+      hd + 1.12,
+      9.6,
+      2.1,
+      0,
+      villa.accentColor,
+    );
+    villaSigns.set(villa.villaId, vSign);
+
+    // Courtyard Marble Lawn + Luxury Swimming Pool
+    const courtyard = new THREE.Mesh(
+      track(new THREE.BoxGeometry(villa.wallSize.w - 2.4, 0.16, villa.wallSize.d - 2.4)),
+      track(new THREE.MeshStandardMaterial({ color: '#3f8f4b', roughness: 0.88 })),
+    );
+    courtyard.position.y = 0.08;
+    const pool = new THREE.Mesh(track(new THREE.BoxGeometry(12, 0.24, 6)), poolWaterMat);
+    pool.position.set(-10, 0.16, 11);
+
+    // Multi-Story Grand Palace Mansion Inside the Compound
+    const palaceBase = new THREE.Mesh(track(new THREE.BoxGeometry(26, 9.6, 18)), marbleWallMat);
+    palaceBase.position.set(0, 5.0, -4);
+    palaceBase.castShadow = true;
+    palaceBase.receiveShadow = true;
+    const palaceUpper = new THREE.Mesh(track(new THREE.BoxGeometry(18, 5.4, 13)), marbleWallMat);
+    palaceUpper.position.set(0, 12.5, -4);
+    palaceUpper.castShadow = true;
+    const palaceDome = new THREE.Mesh(
+      track(new THREE.SphereGeometry(5.5, 20, 14, 0, Math.PI * 2, 0, Math.PI * 0.5)),
+      goldMat,
+    );
+    palaceDome.position.set(0, 15.2, -4);
+    const palaceDoor = new THREE.Mesh(track(new THREE.BoxGeometry(3.8, 4.4, 0.4)), goldMat);
+    palaceDoor.position.set(0, 2.4, 5.15);
+
+    vg.add(
+      backW,
+      leftW,
+      rightW,
+      frontL,
+      frontR,
+      copingBack,
+      gatePillarL,
+      gatePillarR,
+      gateBeam,
+      gateGoldCap,
+      courtyard,
+      pool,
+      palaceBase,
+      palaceUpper,
+      palaceDome,
+      palaceDoor,
+    );
+    root.add(vg);
+
+    // Colliders for compound perimeter walls (leaving gate open so visitors can walk into courtyard) & main palace
+    physics.addStaticBox(`${villa.villaId}-back`, villa.x, gy + wallH * 0.5, villa.z - hd, villa.wallSize.w, wallH, wallT);
+    physics.addStaticBox(`${villa.villaId}-left`, villa.x - hw, gy + wallH * 0.5, villa.z, wallT, wallH, villa.wallSize.d);
+    physics.addStaticBox(`${villa.villaId}-right`, villa.x + hw, gy + wallH * 0.5, villa.z, wallT, wallH, villa.wallSize.d);
+    physics.addStaticBox(`${villa.villaId}-fl`, villa.x - hw + frontSegW * 0.5, gy + wallH * 0.5, villa.z + hd, frontSegW, wallH, wallT);
+    physics.addStaticBox(`${villa.villaId}-fr`, villa.x + hw - frontSegW * 0.5, gy + wallH * 0.5, villa.z + hd, frontSegW, wallH, wallT);
+    physics.addStaticBox(`${villa.villaId}-palace`, villa.x, gy + 7.5, villa.z - 4, 26.4, 15, 18.4);
+  }
+
+  // =========================================================================
+  // 8F. HIDDEN VIP GAME CENTER ENTRANCE CARD ON HIGH-RISK DANGER PEAK CLIFF
+  // =========================================================================
+  const hiddenCardGroup = new THREE.Group();
+  const cliffY = groundHeightAt(HIDDEN_CARD_POS.x, HIDDEN_CARD_POS.z);
+  hiddenCardGroup.position.set(HIDDEN_CARD_POS.x, cliffY + 1.3, HIDDEN_CARD_POS.z);
+  const cardMesh = new THREE.Mesh(
+    track(new THREE.BoxGeometry(1.15, 0.72, 0.08)),
+    track(
+      new THREE.MeshStandardMaterial({
+        color: '#facc15',
+        emissive: '#f59e0b',
+        emissiveIntensity: 1.4,
+        roughness: 0.2,
+        metalness: 0.85,
+      }),
+    ),
+  );
+  const cardHalo = new THREE.Mesh(
+    track(new THREE.TorusGeometry(0.95, 0.06, 8, 24)),
+    track(new THREE.MeshBasicMaterial({ color: '#fde047', transparent: true, opacity: 0.75 })),
+  );
+  hiddenCardGroup.add(cardMesh, cardHalo);
+  root.add(hiddenCardGroup);
 
   // Glowing Interactive Entrance Portals at All 12 Active Buildings
   const portalMatCache = new Map<string, THREE.MeshBasicMaterial>();
@@ -1347,6 +1712,11 @@ export function buildGreenValleyWorld(
     npcRigs,
     missionBeacon,
     propertySigns,
+    villaSigns,
+    hiddenCardGroup,
+    boundaryGroup,
+    updateBoundaryRing,
+    updateMingleScreen,
     sailboat,
     campfireGlow,
     dispose,
@@ -1459,6 +1829,24 @@ export function buildCustomHomeMesh(
     group.add(poolDeck, poolWater);
   }
 
+  // Optional Facilities: Garden Pergola & AC Outdoor Unit
+  if (home.hasGarden) {
+    const lawn = new THREE.Mesh(
+      track(new THREE.BoxGeometry(w + 4.2, 0.12, d + 4.2)),
+      track(new THREE.MeshStandardMaterial({ color: '#22c55e', roughness: 0.9 })),
+    );
+    lawn.position.y = 0.06;
+    group.add(lawn);
+  }
+  if (home.hasAc) {
+    const acBox = new THREE.Mesh(
+      track(new THREE.BoxGeometry(1.1, 0.85, 0.55)),
+      track(new THREE.MeshStandardMaterial({ color: '#e2e8f0', roughness: 0.4, metalness: 0.3 })),
+    );
+    acBox.position.set(w * 0.5 + 0.3, 1.4, -d * 0.25);
+    group.add(acBox);
+  }
+
   // Garden bushes / planter boxes flanking entrance
   const bushMat = track(
     new THREE.MeshStandardMaterial({
@@ -1473,25 +1861,28 @@ export function buildCustomHomeMesh(
     group.add(bush);
   }
 
-  // Front Yard Nameplate Sign displaying Home Name, Owner Name & @Instagram ID
+  // High-Contrast Roofline + Front Yard Nameplate Signs displaying exact Home Name & Owner
   const ownerLine = home.ownerInstagram
     ? `${home.ownerName} · @${home.ownerInstagram}`
     : `Owner: ${home.ownerName}`;
-  const signPost = new THREE.Mesh(track(new THREE.CylinderGeometry(0.08, 0.08, 2.1, 8)), darkMetal);
-  signPost.position.set(w * 0.42, 1.05, d * 0.5 + 2.5);
   const signTex = track(
     createSignTexture(
-      home.name,
+      home.name.toUpperCase(),
       home.createdByAdmin ? `★ ${ownerLine}` : ownerLine,
       home.createdByAdmin ? '#f59e0b' : '#10b981',
     ),
   );
-  const signMesh = new THREE.Mesh(
-    track(new THREE.PlaneGeometry(3.8, 0.96)),
-    track(new THREE.MeshStandardMaterial({ map: signTex, roughness: 0.35 })),
+  const signMat = track(new THREE.MeshStandardMaterial({ map: signTex, roughness: 0.35 }));
+  const facadeSign = new THREE.Mesh(
+    track(new THREE.PlaneGeometry(Math.min(w * 0.85, 6.8), 1.55)),
+    signMat,
   );
-  signMesh.position.set(w * 0.42, 2.25, d * 0.5 + 2.62);
-  group.add(signPost, signMesh);
+  facadeSign.position.set(0, Math.min(h - 0.3, 4.6), d * 0.5 + 0.14);
+  const signPost = new THREE.Mesh(track(new THREE.CylinderGeometry(0.08, 0.08, 2.2, 8)), darkMetal);
+  signPost.position.set(w * 0.42, 1.1, d * 0.5 + 2.5);
+  const yardSign = new THREE.Mesh(track(new THREE.PlaneGeometry(4.2, 1.05)), signMat);
+  yardSign.position.set(w * 0.42, 2.35, d * 0.5 + 2.62);
+  group.add(facadeSign, signPost, yardSign);
 
   return {
     group,
@@ -1503,7 +1894,8 @@ export function buildCustomHomeMesh(
 }
 
 /**
- * Dynamically builds a Player-Opened 3D Shop Stall (Kerala Tea Stall / Chaya Kada, Juice Bar, Bakery, Boutique, Tech).
+ * Dynamically builds a Player-Opened 3D Shop Stall scaled by sizeTier (Small / Medium / Large / Palace)
+ * with clear high-contrast Shop Name & Owner signboard plus optional seating & AC.
  */
 export function buildCustomShopMesh(
   shop: CustomShopDef,
@@ -1514,9 +1906,14 @@ export function buildCustomShopMesh(
     return res;
   };
   const plan = CUSTOM_SHOP_PLANS.find((p) => p.shopType === shop.shopType) || CUSTOM_SHOP_PLANS[0];
+  const tierInfo = SHOP_SIZE_TIERS.find((t) => t.tier === (shop.sizeTier || 'small')) || SHOP_SIZE_TIERS[0];
+  const scale = tierInfo.scale;
 
   const group = new THREE.Group();
   group.position.set(shop.x, shop.y, shop.z);
+  const inner = new THREE.Group();
+  inner.scale.set(scale, Math.min(1.5, 0.85 + scale * 0.25), scale);
+  group.add(inner);
 
   const woodMat = track(new THREE.MeshStandardMaterial({ color: '#78350f', roughness: 0.85 }));
   const counterTopMat = track(new THREE.MeshStandardMaterial({ color: '#f1f5f9', roughness: 0.4 }));
@@ -1525,7 +1922,6 @@ export function buildCustomShopMesh(
   const brassMat = track(new THREE.MeshStandardMaterial({ color: '#f59e0b', roughness: 0.25, metalness: 0.82 }));
   const lampMat = track(new THREE.MeshStandardMaterial({ color: '#fef08a', emissive: '#fbbf24', emissiveIntensity: 1.5 }));
 
-  // Wooden platform & counter base
   const deck = new THREE.Mesh(track(new THREE.BoxGeometry(5.2, 0.22, 3.8)), woodMat);
   deck.position.y = 0.11;
   deck.receiveShadow = true;
@@ -1537,30 +1933,27 @@ export function buildCustomShopMesh(
   const backWall = new THREE.Mesh(track(new THREE.BoxGeometry(4.6, 3.0, 0.28)), woodMat);
   backWall.position.set(0, 1.7, -1.5);
   backWall.castShadow = true;
-  group.add(deck, counter, topSlab, backWall);
+  inner.add(deck, counter, topSlab, backWall);
 
-  // Corner Support Posts
   const postGeo = track(new THREE.CylinderGeometry(0.09, 0.1, 3.2, 8));
   for (const [px, pz] of [[-2.2, 1.5], [2.2, 1.5], [-2.2, -1.5], [2.2, -1.5]]) {
     const post = new THREE.Mesh(postGeo, woodMat);
     post.position.set(px, 1.7, pz);
-    group.add(post);
+    inner.add(post);
   }
 
-  // Striped Market Canopy Roof
   const roof = new THREE.Mesh(track(new THREE.BoxGeometry(5.4, 0.25, 4.4)), awningMat);
   roof.position.set(0, 3.35, 0.15);
   roof.rotation.x = 0.08;
   roof.castShadow = true;
-  group.add(roof);
+  inner.add(roof);
   for (let sx = -2.0; sx <= 2.0; sx += 1.0) {
     const stripe = new THREE.Mesh(track(new THREE.BoxGeometry(0.42, 0.27, 4.44)), stripeMat);
     stripe.position.set(sx, 3.36, 0.15);
     stripe.rotation.x = 0.08;
-    group.add(stripe);
+    inner.add(stripe);
   }
 
-  // Signature Props on Counter (Brass Tea Samovar + Snack Glass Jars for Chaya Kada!)
   if (shop.shopType === 'tea_stall') {
     const samovar = new THREE.Mesh(track(new THREE.CylinderGeometry(0.24, 0.28, 0.72, 14)), brassMat);
     samovar.position.set(-1.3, 1.82, 0.9);
@@ -1571,35 +1964,119 @@ export function buildCustomShopMesh(
     jar1.position.set(0.4, 1.7, 0.9);
     const jar2 = jar1.clone();
     jar2.position.x = 1.25;
-    group.add(samovar, samovarDome, jar1, jar2);
+    inner.add(samovar, samovarDome, jar1, jar2);
   } else {
     const displayBox = new THREE.Mesh(track(new THREE.BoxGeometry(2.2, 0.55, 0.7)), counterTopMat);
     displayBox.position.set(0, 1.72, 0.9);
-    group.add(displayBox);
+    inner.add(displayBox);
   }
 
-  // Warm Hanging Shop Bulb
+  if (shop.hasSeating) {
+    const bench = new THREE.Mesh(track(new THREE.BoxGeometry(2.6, 0.48, 0.65)), woodMat);
+    bench.position.set(0, 0.35, 2.75);
+    inner.add(bench);
+  }
+  if (shop.hasAc) {
+    const ac = new THREE.Mesh(track(new THREE.BoxGeometry(0.95, 0.65, 0.45)), counterTopMat);
+    ac.position.set(2.4, 2.2, -1.2);
+    inner.add(ac);
+  }
+
   const bulb = new THREE.Mesh(track(new THREE.SphereGeometry(0.18, 10, 10)), lampMat);
   bulb.position.set(0, 3.05, 1.1);
-  group.add(bulb);
+  inner.add(bulb);
 
-  // Bright Shop Signboard
+  // Crisp High-Contrast Shop Signboard showing Shop Name, Tier & Owner
   const ownerSub = shop.ownerInstagram
-    ? `${plan.label} · @${shop.ownerInstagram}`
-    : `${plan.label} · by ${shop.ownerName}`;
-  const signTex = track(createSignTexture(shop.name, ownerSub, shop.awningColor || plan.defaultAwning));
-  const signMesh = new THREE.Mesh(
-    track(new THREE.PlaneGeometry(4.6, 1.05)),
-    track(new THREE.MeshStandardMaterial({ map: signTex, roughness: 0.35 })),
-  );
-  signMesh.position.set(0, 3.98, 2.2);
-  group.add(signMesh);
+    ? `${tierInfo.label} ${plan.label} · @${shop.ownerInstagram}`
+    : `${tierInfo.label} ${plan.label} · ${shop.ownerName}`;
+  const signTex = track(createSignTexture(shop.name.toUpperCase(), ownerSub, shop.awningColor || plan.defaultAwning));
+  const signMat = track(new THREE.MeshStandardMaterial({ map: signTex, roughness: 0.32 }));
+  const signMesh = new THREE.Mesh(track(new THREE.PlaneGeometry(5.2, 1.2)), signMat);
+  signMesh.position.set(0, 4.15, 2.22);
+  const backSignMesh = new THREE.Mesh(track(new THREE.PlaneGeometry(5.2, 1.2)), signMat);
+  backSignMesh.position.set(0, 4.15, -1.7);
+  backSignMesh.rotation.y = Math.PI;
+  inner.add(signMesh, backSignMesh);
 
   return {
     group,
-    size: { x: 5.2, y: 3.6, z: 3.8 },
+    size: { x: 5.2 * scale, y: 3.8 * scale, z: 3.8 * scale },
     dispose: () => {
       disposables.forEach((dItem) => dItem.dispose());
+    },
+  };
+}
+
+/**
+ * Full-time running KSRTC Super Fast Public Transit Bus Mesh.
+ */
+export function buildPublicBusMesh(): { group: THREE.Group; wheels: THREE.Mesh[]; dispose: () => void } {
+  const disposables: { dispose: () => void }[] = [];
+  const track = <T extends { dispose: () => void }>(res: T): T => {
+    disposables.push(res);
+    return res;
+  };
+  const group = new THREE.Group();
+  const redMat = track(new THREE.MeshStandardMaterial({ color: '#dc2626', roughness: 0.38, metalness: 0.2 }));
+  const yellowMat = track(new THREE.MeshStandardMaterial({ color: '#facc15', roughness: 0.42 }));
+  const glassMat = track(new THREE.MeshStandardMaterial({ color: '#bae6fd', roughness: 0.12, metalness: 0.45 }));
+  const wheelMat = track(new THREE.MeshStandardMaterial({ color: '#18181b', roughness: 0.85 }));
+
+  const lower = new THREE.Mesh(track(new THREE.BoxGeometry(2.7, 1.35, 9.4)), redMat);
+  lower.position.y = 1.25;
+  lower.castShadow = true;
+  const stripe = new THREE.Mesh(track(new THREE.BoxGeometry(2.74, 0.35, 9.44)), yellowMat);
+  stripe.position.y = 1.98;
+  const cabin = new THREE.Mesh(track(new THREE.BoxGeometry(2.65, 1.15, 9.1)), glassMat);
+  cabin.position.y = 2.68;
+  const roof = new THREE.Mesh(track(new THREE.BoxGeometry(2.7, 0.25, 9.2)), yellowMat);
+  roof.position.y = 3.35;
+  const signTex = track(createSignTexture('KSRTC SUPER FAST', 'GREEN VALLEY 24/7 PUBLIC BUS', '#facc15'));
+  const board = new THREE.Mesh(
+    track(new THREE.PlaneGeometry(2.2, 0.55)),
+    track(new THREE.MeshStandardMaterial({ map: signTex })),
+  );
+  board.position.set(0, 3.02, 4.62);
+  group.add(lower, stripe, cabin, roof, board);
+
+  const wheelGeo = track(new THREE.CylinderGeometry(0.55, 0.55, 0.4, 14));
+  wheelGeo.rotateZ(Math.PI / 2);
+  const wheels: THREE.Mesh[] = [];
+  for (const [wx, wz] of [[-1.38, 3.0], [1.38, 3.0], [-1.38, -2.9], [1.38, -2.9]]) {
+    const w = new THREE.Mesh(wheelGeo, wheelMat);
+    w.position.set(wx, 0.55, wz);
+    group.add(w);
+    wheels.push(w);
+  }
+
+  return {
+    group,
+    wheels,
+    dispose: () => disposables.forEach((d) => d.dispose()),
+  };
+}
+
+/**
+ * Playable 3D Sports Ball (Football or Volleyball).
+ */
+export function buildSportsBallMesh(kind: 'football' | 'volleyball'): {
+  mesh: THREE.Mesh;
+  dispose: () => void;
+} {
+  const geo = new THREE.SphereGeometry(0.45, 18, 14);
+  const mat = new THREE.MeshStandardMaterial({
+    color: kind === 'football' ? '#f8fafc' : '#fde047',
+    roughness: 0.42,
+    metalness: 0.08,
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.castShadow = true;
+  return {
+    mesh,
+    dispose: () => {
+      geo.dispose();
+      mat.dispose();
     },
   };
 }

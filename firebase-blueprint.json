@@ -62,6 +62,12 @@
         "followedStudio": {
           "type": "boolean"
         },
+        "muscleLevel": {
+          "type": "number"
+        },
+        "hasGameCenterCard": {
+          "type": "boolean"
+        },
         "customLocations": {
           "type": "array",
           "description": "Up to 15 custom saved map locations {id, name, category, x, z}"
@@ -309,6 +315,12 @@
         "hasPool": {
           "type": "boolean"
         },
+        "hasGarden": {
+          "type": "boolean"
+        },
+        "hasAc": {
+          "type": "boolean"
+        },
         "interiorTheme": {
           "type": "string",
           "enum": ["modern", "cozy", "minimal", "luxury"]
@@ -347,7 +359,7 @@
     },
     "CustomShop": {
       "title": "CustomShop",
-      "description": "Player-opened 3D street stall or shop (Tea Stall / Chaya Kada, Juice Bar, Bakery, Boutique, Tech Shop) in Green Valley.",
+      "description": "Player-opened 3D street stall or shop (Tea Stall / Chaya Kada, Juice Bar, Bakery, Boutique, Tech Shop) with hashed secret owner interior key.",
       "type": "object",
       "properties": {
         "shopId": {
@@ -386,6 +398,20 @@
           "type": "string",
           "maxLength": 12
         },
+        "ownerKeyHash": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "sizeTier": {
+          "type": "string",
+          "enum": ["small", "medium", "large", "palace"]
+        },
+        "hasSeating": {
+          "type": "boolean"
+        },
+        "hasAc": {
+          "type": "boolean"
+        },
         "x": { "type": "number" },
         "y": { "type": "number" },
         "z": { "type": "number" },
@@ -409,6 +435,61 @@
         "isPublic",
         "createdAt",
         "updatedAt"
+      ]
+    },
+    "PublicAd": {
+      "title": "PublicAd",
+      "description": "Citizen-published public advertisement created at Green Valley Public Ad Center.",
+      "type": "object",
+      "properties": {
+        "adId": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 42
+        },
+        "subtitle": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 96
+        },
+        "instagramHandle": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "accentColor": {
+          "type": "string",
+          "maxLength": 12
+        },
+        "ownerUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerName": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 24
+        },
+        "isPublic": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "adId",
+        "title",
+        "subtitle",
+        "instagramHandle",
+        "accentColor",
+        "ownerUid",
+        "ownerName",
+        "isPublic",
+        "createdAt"
       ]
     },
     "VerifiedFollower": {
@@ -436,7 +517,7 @@
   "firestore": {
     "/players/{uid}": {
       "schema": { "$ref": "#/entities/PlayerProfile" },
-      "description": "Public player profile, Instagram handle, daily login streak, Single-to-Mingle info, custom locations, avatar, and progression."
+      "description": "Public player profile, Instagram handle, weekly login streak, Single-to-Mingle info, Gym muscleLevel, custom locations, avatar, and progression."
     },
     "/players/{uid}/private/{docId}": {
       "schema": { "$ref": "#/entities/PlayerPrivateAccount" },
@@ -457,6 +538,10 @@
     "/customShops/{shopId}": {
       "schema": { "$ref": "#/entities/CustomShop" },
       "description": "Player-opened custom 3D shops and Tea Stalls across Green Valley."
+    },
+    "/publicAds/{adId}": {
+      "schema": { "$ref": "#/entities/PublicAd" },
+      "description": "Citizen-published public ads displayed across Green Valley billboards and HUD."
     },
     "/verifiedFollowers/{igDocId}": {
       "schema": { "$ref": "#/entities/VerifiedFollower" },
